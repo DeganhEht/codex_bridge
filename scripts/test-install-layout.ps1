@@ -23,6 +23,7 @@ try {
     $null = & $installer -SourceRoot $repoRoot -InstallRoot $installRoot -CodexHome $codexHome -DesktopPath $desktopPath -SkipConfiguration -SkipShortcuts -Confirm:$false
     foreach ($requiredPath in @(
             'codex-desktop-model-launcher.ps1',
+            'handoff-result-contract.psm1',
             'initialize-handoff.ps1',
             'create-handoff-shortcuts.ps1',
             'uninstall.ps1',
@@ -44,6 +45,7 @@ try {
         manifestPreserved = Test-Path -LiteralPath (Join-Path $installRoot 'thread-localizer\data\batch-handoff-manifest.json')
         reportPreserved = Test-Path -LiteralPath (Join-Path $installRoot 'thread-localizer\reports\preserve-check.txt')
         sourceRemoved = -not (Test-Path -LiteralPath (Join-Path $installRoot 'thread-localizer\src'))
+        resultContractRemoved = -not (Test-Path -LiteralPath (Join-Path $installRoot 'handoff-result-contract.psm1'))
         shortcutsAbsent = @(Get-ChildItem -LiteralPath $desktopPath -Filter '*.lnk').Count -eq 0
     }
     if ($checks.Values -contains $false) { throw "安装/卸载布局验收失败：$($checks | ConvertTo-Json -Compress)" }

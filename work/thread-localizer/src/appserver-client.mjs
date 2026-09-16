@@ -186,6 +186,3 @@ export async function createAppServerClient(options = {}) {
   return client;
 }
 
-export function appServerErrorSummary(error) {
-  return jsonRpcErrorMessage(error);
-}

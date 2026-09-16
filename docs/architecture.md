@@ -1,12 +1,12 @@
 # Architecture
 
-## The handoff baton
+## The paired handoff baton
 
 The app-server exposes tasks as threads. The tool treats each logical task as
-a baton recorded in a local manifest. A baton records the current thread ID,
-provider, model, project `cwd`, and the source relationship used for the last
-handoff. The manifest is a deduplication index; it is not a replacement for
-Codex's task database.
+a pair of provider-native threads recorded in a local manifest. The manifest
+records both provider thread IDs, the current endpoint, provider/model
+preferences, and a per-endpoint rollout cursor. It is a deduplication index;
+it is not a replacement for Codex's task database.
 
 ```text
 thread/list
@@ -15,19 +15,25 @@ discoverLocalTasks + settings filters
    ↓
 dry-run report (no writes)
    ↓
-thread/fork
+thread/start (independent paginated target)
    ↓
-optional normalization of the new target rollout
+thread/inject_items + target-only projection events
    ↓
-thread/read(includeTurns=true) + thread/items/list
+thread/resume + thread/read + thread/items/list
    ↓
-manifest update and verified old baton delete
+manifest stores both provider endpoints
+   ↓
+later switch: read source delta after cursor → inject into existing pair
 ```
 
-The implementation tries `thread/fork` first. If the installed protocol does
-not expose that operation, it tries the documented rollout-path route, and only
-then uses `thread/start` plus `thread/inject_items`. This order is deliberate:
-forking keeps the server's own thread metadata and lineage intact.
+The target is intentionally not created with `thread/fork`. Current paginated
+Codex history keeps a fork reference to the source and refuses to delete that
+source while the fork exists. The first switch starts an independent paginated
+thread and copies the ordered history. Later switches reuse that same provider
+endpoint and transfer only records after its cursor. Provider-native encrypted
+reasoning is never copied between endpoints; visible messages, tool results,
+and projection events are synchronized instead. A logical task therefore
+remains exactly two threads rather than accumulating one thread per switch.
 
 ## Provider boundary
 
@@ -45,10 +51,13 @@ only when no task failed or remained blocked. It never sends a user prompt.
 ## Compatibility normalization
 
 DeepSeek Responses records can contain reasoning `content` arrays that the
-OpenAI task schema rejects. The normalizer changes only the newly forked
+OpenAI task schema rejects. The normalizer changes only the history injected
+into the newly created
 OpenAI target while the original source task still exists:
 
 - reasoning `content` becomes `null`;
+- thread-bound reasoning `encrypted_content` becomes `null` before every
+  independent handoff, because it cannot be verified in a replacement thread;
 - DeepSeek web-search IDs are mapped from `call_*` to `ws_*` and matching
   `web_search_end.call_id` references are updated;
 - ordinary function-call IDs are not changed;
@@ -62,9 +71,8 @@ home, and records the executable signature and request-schema hash. A stale or
 missing cache is regenerated; an incompatible protocol stops before mutation.
 
 The tool does not copy the task database or rollouts into cumulative backup
-directories. It leaves the source task untouched until the replacement has
-passed provider, model, count, path, and compatibility checks. A failed target
-is deleted through `thread/delete`; after success, the manifest points to the
-replacement and the old source is deleted through the same official protocol.
-The tool never updates `state_5.sqlite`, `session_index.jsonl`, or a source
-rollout in place.
+directories. It leaves both paired endpoints intact after provider, model,
+count, path, and compatibility checks. A failed newly-created target is
+deleted through `thread/delete`; retained paired endpoints are never treated
+as cleanup predecessors. The tool never updates `state_5.sqlite`,
+`session_index.jsonl`, or a source rollout in place.

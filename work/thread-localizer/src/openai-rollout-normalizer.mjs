@@ -3,10 +3,57 @@ function isResponseItem(record, payloadType) {
     && record.value.payload?.type === payloadType;
 }
 
+const TOOL_OUTPUT_TYPES = new Set(["function_call_output", "custom_tool_call_output"]);
+
 function isWebSearchEvent(record) {
   return record?.value?.type === "event_msg"
     && typeof record.value.payload?.type === "string"
     && record.value.payload.type.startsWith("web_search_");
+}
+
+function isToolOutputRecord(record) {
+  return record?.value?.type === "response_item"
+    && TOOL_OUTPUT_TYPES.has(record.value.payload?.type);
+}
+
+/**
+ * DeepSeek 的 Responses 接口要求每个工具结果都带 call_id，缺失时整次请求会被反序列化错误拒绝。
+ * 只丢弃完全没有 call_id 的结果项：带 call_id 但调用项位于更早增量里的情况是正常的，
+ * 不能按“找不到调用项”来删除。
+ */
+export function dropOrphanToolOutputs(records) {
+  const droppedOrphanToolOutputs = [];
+  const normalizedRecords = records.filter((record) => {
+    if (!isToolOutputRecord(record)) return true;
+    const payload = record.value.payload;
+    const callId = payload?.call_id;
+    if (typeof callId === "string" && callId.length > 0) return true;
+    droppedOrphanToolOutputs.push({
+      id: payload?.id ?? null,
+      name: payload?.name ?? null,
+      type: payload?.type ?? null,
+    });
+    return false;
+  });
+  return { records: normalizedRecords, droppedOrphanToolOutputs };
+}
+
+export function clearThreadBoundEncryptedReasoning(records) {
+  let clearedEncryptedReasoningCount = 0;
+  const normalizedRecords = records.map((record) => {
+    if (!isResponseItem(record, "reasoning")) return record;
+    const encrypted = record.value.payload?.encrypted_content;
+    if (typeof encrypted !== "string" || encrypted.length === 0) return record;
+    clearedEncryptedReasoningCount += 1;
+    return {
+      ...record,
+      value: {
+        ...record.value,
+        payload: { ...record.value.payload, encrypted_content: null },
+      },
+    };
+  });
+  return { records: normalizedRecords, clearedEncryptedReasoningCount };
 }
 
 function openAIWebSearchId(sourceId) {
@@ -45,7 +92,19 @@ function buildWebSearchIdMap(records) {
   return replacements;
 }
 
-export function normalizeOpenAIRolloutRecords(records) {
+export function normalizeOpenAIRolloutRecords(records, { targetProvider = "openai" } = {}) {
+  if (targetProvider !== "openai") {
+    const dropped = dropOrphanToolOutputs(records);
+    return {
+      records: dropped.records,
+      normalizedReasoningCount: 0,
+      normalizedWebSearchCallIdCount: 0,
+      normalizedWebSearchEventReferenceCount: 0,
+      totalNormalizedCount: 0,
+      droppedOrphanToolOutputs: dropped.droppedOrphanToolOutputs,
+      droppedOrphanToolOutputCount: dropped.droppedOrphanToolOutputs.length,
+    };
+  }
   const webSearchIdMap = buildWebSearchIdMap(records);
   let normalizedReasoningCount = 0;
   let normalizedWebSearchCallIdCount = 0;
@@ -90,5 +149,7 @@ export function normalizeOpenAIRolloutRecords(records) {
     totalNormalizedCount: normalizedReasoningCount
       + normalizedWebSearchCallIdCount
       + normalizedWebSearchEventReferenceCount,
+    droppedOrphanToolOutputs: [],
+    droppedOrphanToolOutputCount: 0,
   };
 }

@@ -82,6 +82,24 @@ function Replace-ManagedBlock {
     return [regex]::Replace($Raw, $pattern, $Block, 1)
 }
 
+function Remove-TopLevelKeys {
+    param([string]$Raw, [string[]]$Keys)
+    $keyPattern = ($Keys | ForEach-Object { [regex]::Escape($_) }) -join '|'
+    $lines = $Raw -split "`r?`n"
+    $out = New-Object System.Collections.Generic.List[string]
+    $insideTable = $false
+    foreach ($line in $lines) {
+        if (-not $insideTable -and $line -match '^\s*\[') {
+            $insideTable = $true
+        }
+        if (-not $insideTable -and $line -match "^\s*(?:$keyPattern)\s*=") {
+            continue
+        }
+        $out.Add($line)
+    }
+    return ($out -join "`r`n")
+}
+
 function Test-CandidateConfig {
     param([string]$Candidate)
     $validationHome = Join-Path $InstallRoot ('.config-validation-' + [guid]::NewGuid().ToString('N'))
@@ -95,7 +113,13 @@ function Test-CandidateConfig {
         $doctorOutput = & (Find-CodexExecutable) --strict-config doctor --json 2>&1
         $doctorExit = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
         try {
-            $doctorJson = ((@($doctorOutput | ForEach-Object { "$_" })) -join [Environment]::NewLine) | ConvertFrom-Json
+            $doctorText = ((@($doctorOutput | ForEach-Object { "$_" })) -join [Environment]::NewLine)
+            # Codex doctor can emit non-JSON warnings before the JSON document
+            # (for example, PATH-alias warnings under a temporary CODEX_HOME).
+            # Parse the JSON document instead of requiring stdout to be pure JSON.
+            $jsonStart = $doctorText.IndexOf('{')
+            if ($jsonStart -lt 0) { throw 'doctor output did not contain a JSON document' }
+            $doctorJson = $doctorText.Substring($jsonStart) | ConvertFrom-Json
         } catch {
             throw "无法解析 Codex doctor 输出（退出码 $doctorExit）：$((@($doctorOutput) | Select-Object -Last 5) -join [Environment]::NewLine)"
         }
@@ -116,6 +140,19 @@ $rawConfig = if (Test-Path -LiteralPath $configPath -PathType Leaf) {
 } else {
     ''
 }
+
+# The active config may already contain model/provider keys written by the
+# official DeepSeek installer. Remove only the top-level keys owned by this
+# handoff mode block before adding the managed GPT mode block. This prevents
+# duplicate TOML keys when Codex has strict config loading enabled.
+$rawConfig = Remove-TopLevelKeys -Raw $rawConfig -Keys @(
+    'model',
+    'model_provider',
+    'preferred_auth_method',
+    'forced_login_method',
+    'model_reasoning_effort',
+    'model_catalog_json'
+)
 
 $modeBlock = @"
 $modeStart

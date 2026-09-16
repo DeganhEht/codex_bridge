@@ -2,7 +2,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$files = Get-ChildItem -LiteralPath $repoRoot -Filter '*.ps1' -File -Recurse |
+$files = Get-ChildItem -LiteralPath $repoRoot -File -Recurse |
+    Where-Object { $_.Extension -in @('.ps1', '.psm1') } |
     Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' }
 $failures = New-Object System.Collections.Generic.List[string]
 

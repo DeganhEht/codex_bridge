@@ -28,17 +28,40 @@ $workingDirectory = Join-Path $env:USERPROFILE 'Documents\Codex'
 if (-not (Test-Path -LiteralPath $workingDirectory -PathType Container)) { $workingDirectory = $env:USERPROFILE }
 $fallbackIcon = Join-Path $env:SystemRoot 'System32\shell32.dll'
 
+$legacyShortcuts = @(
+    [ordered]@{ name = '任务交接GPT.lnk'; provider = 'gpt' },
+    [ordered]@{ name = 'DeepSeek交接.lnk'; provider = 'deepseek' }
+)
+$removedLegacy = New-Object System.Collections.Generic.List[string]
+$legacyConflicts = New-Object System.Collections.Generic.List[string]
+$shell = New-Object -ComObject WScript.Shell
+foreach ($legacy in $legacyShortcuts) {
+    $legacyPath = Join-Path $DesktopPath $legacy.name
+    if (-not (Test-Path -LiteralPath $legacyPath -PathType Leaf)) { continue }
+    $existing = $shell.CreateShortcut($legacyPath)
+    $expectedArgument = "-Provider $($legacy.provider)"
+    $isOurShortcut = ($existing.Arguments -like "*$launcherPath*") -and ($existing.Arguments -like "*$expectedArgument*")
+    if (-not $isOurShortcut) {
+        $legacyConflicts.Add($legacyPath)
+        continue
+    }
+    if ($PSCmdlet.ShouldProcess($legacyPath, '移除旧版重复任务交接快捷方式')) {
+        Remove-Item -LiteralPath $legacyPath -Force
+        $removedLegacy.Add($legacyPath)
+    }
+}
+
 $definitions = @(
     [ordered]@{
         provider = 'gpt'
-        name = '任务交接GPT.lnk'
+        name = '交接给GPT.lnk'
         description = 'Finish the DeepSeek-to-GPT task handoff before opening Codex.'
         icon = if ($GptIconPath) { $GptIconPath } else { $fallbackIcon }
         iconIndex = 2
     },
     [ordered]@{
         provider = 'deepseek'
-        name = 'DeepSeek交接.lnk'
+        name = '交接给deepseek.lnk'
         description = 'Finish the GPT-to-DeepSeek task handoff before opening Codex.'
         icon = if ($DeepSeekIconPath) { $DeepSeekIconPath } else { $fallbackIcon }
         iconIndex = 13
@@ -73,4 +96,9 @@ foreach ($definition in $definitions) {
     })
 }
 
-[ordered]@{ whatIf = [bool]$WhatIfPreference; shortcuts = $created.ToArray() } | ConvertTo-Json -Depth 5
+[ordered]@{
+    whatIf = [bool]$WhatIfPreference
+    shortcuts = $created.ToArray()
+    removedLegacyShortcuts = $removedLegacy.ToArray()
+    legacyShortcutConflicts = $legacyConflicts.ToArray()
+} | ConvertTo-Json -Depth 5

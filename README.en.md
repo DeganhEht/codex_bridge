@@ -8,6 +8,26 @@ Keep working on the same task in the Codex desktop app with GPT and DeepSeek.
 > this is your first time using a command line, that is fine: this guide starts
 > with how to download the project and walks through every step.
 
+## Credits and upstream
+
+This project is a heavily modified derivative of
+[kaidongli30-cpu/Codex-Deepseek-Handoff](https://github.com/kaidongli30-cpu/Codex-Deepseek-Handoff)
+(MIT License, Copyright (c) 2026 kaidongli30-cpu), which provides the original
+GPT-to-DeepSeek handoff base and installer. This repository turns the handoff
+into **persistent paired endpoints with delta synchronization** and adds the
+desktop usability and troubleshooting work listed in
+[CHANGELOG.md](CHANGELOG.md). The upstream MIT license and copyright notice are
+kept in [LICENSE](LICENSE).
+
+Third-party assets: DeepSeek's official model catalog and the official Codex
+setup script stay on the user's machine. This repository does not redistribute
+them, nor DeepSeek's branded icons; the installer only reuses the official setup
+you already completed. Those assets remain the property of DeepSeek.
+
+Maintainer: the rewrite and maintenance of this repository are by
+`DeganhEht`; the original project and design come from the
+upstream repository credited above.
+
 ## What problem does this project solve?
 
 DeepSeek's official integration already provides a way to use Codex with
@@ -26,7 +46,7 @@ Work in GPT
     ↓
 Fully close Codex
     ↓
-Click "DeepSeek交接" on the desktop
+Click "交接给deepseek" on the desktop
     ↓
 The tool hands off the tasks, then opens Codex in DeepSeek mode
     ↓
@@ -34,7 +54,7 @@ Continue the original task in DeepSeek
     ↓
 Fully close Codex
     ↓
-Click "任务交接GPT" on the desktop
+Click "交接给GPT" on the desktop
     ↓
 The tool cleans up and hands off the tasks, then opens Codex in GPT mode
 ```
@@ -132,7 +152,7 @@ next section.
 
 ### Option A: Download the ZIP (recommended for beginners)
 
-1. Open this project's GitHub page.
+1. Open this repository's page: <https://github.com/DeganhEht/codex_bridge>
 2. Click the green `Code` button at the top.
 3. Click `Download ZIP`.
 4. Once downloaded, find the ZIP file in File Explorer.
@@ -262,16 +282,16 @@ send messages automatically.
 After a successful install, the desktop should show:
 
 ```text
-DeepSeek交接
-任务交接GPT
+交接给deepseek
+交接给GPT
 ```
 
 Their roles are:
 
 | Shortcut | When to click | What it does |
 | --- | --- | --- |
-| `DeepSeek交接` | You are using GPT and want to switch to DeepSeek | Hands GPT tasks to DeepSeek, then opens Codex |
-| `任务交接GPT` | You are using DeepSeek and want to return to GPT | Cleans up and hands DeepSeek tasks back to GPT, then opens Codex |
+| `交接给deepseek` | You are using GPT and want to switch to DeepSeek | Hands GPT tasks to DeepSeek, then opens Codex |
+| `交接给GPT` | You are using DeepSeek and want to return to GPT | Cleans up and hands DeepSeek tasks back to GPT, then opens Codex |
 
 ## Your first handoff
 
@@ -289,7 +309,7 @@ Use a throwaway test task for the first acceptance check.
 3. Wait for GPT to finish replying.
 4. Fully close Codex.
 5. Wait a few seconds and confirm the Codex window is completely gone.
-6. Double-click `DeepSeek交接` on the desktop.
+6. Double-click `交接给deepseek` on the desktop.
 7. **Click once, then wait.**
 8. When the handoff finishes, Codex opens automatically with the DeepSeek
    configuration.
@@ -302,7 +322,7 @@ Use a throwaway test task for the first acceptance check.
 1. Wait until DeepSeek finishes replying.
 2. Fully close Codex.
 3. Wait a few seconds.
-4. Double-click `任务交接GPT` on the desktop.
+4. Double-click `交接给GPT` on the desktop.
 5. **Click once, then wait.**
 6. The tool first handles reasoning and web-search records that are
    incompatible with GPT.
@@ -315,14 +335,60 @@ If all of the above works, bidirectional handoff is working.
 
 ## Everyday usage
 
-From now on, remember only two rules:
+Both shortcuts mean "target mode", and both can also just open Codex without a
+handoff:
 
-- **GPT → DeepSeek:** close Codex, then click `DeepSeek交接`.
-- **DeepSeek → GPT:** close Codex, then click `任务交接GPT`.
+- **`交接给deepseek`:** close Codex first, then click it. The picker lists the
+  GPT-side tasks; select them to hand off, write the DeepSeek configuration,
+  start the local adapter and open Codex in DeepSeek mode. You can also pick
+  **"仅打开 Codex（继续当前模式）"** to only start the adapter and reopen the last
+  task.
+- **`交接给GPT`:** close Codex first, then click it. The picker lists every
+  DeepSeek-side task (including conversations created while running in DeepSeek
+  mode); select them to synchronize and open Codex in GPT mode.
+
+When you select several tasks at once, every selected task is opened once, one
+after another, so all of them show up in the Codex sidebar (identified by the
+`[GPT]` / `[DeepSeek]` prefix); the foreground ends on the task that actually
+changed in this run. Runs that process two or more tasks also show a summary
+popup with each task name and its `codex://threads/...` link, and write the same
+list to `%USERPROFILE%\.codex\model-switcher\handoff-logs\last-handoff.json`.
 
 Do not click the official Codex icon in the taskbar right after using DeepSeek.
 That bypasses the handoff step, and the newest DeepSeek content may not appear
 in the GPT task yet.
+
+### Shutting down and reopening
+
+- **Closing DeepSeek-mode Codex triggers nothing automatic:** the launcher only
+  stops the local adapter, keeps `config.toml` as it is, and exits. No
+  configuration write, no reopened window, no synchronization, so shutting the
+  machine down right after closing Codex is safe.
+- Synchronization only happens at the moment you click a shortcut and select
+  tasks, so shutting down can never interrupt a handoff.
+- To resume later, click the matching shortcut and choose **"仅打开 Codex
+  （继续当前模式）"**. It reopens the last task through a deep link when a record
+  exists, otherwise it starts Codex normally.
+- After DeepSeek-mode Codex closes, the adapter has exited too. Starting Codex
+  from the official icon at that point keeps the DeepSeek configuration but has
+  no adapter, so requests fail. Always use `交接给deepseek` when you want DeepSeek.
+
+### Task name tags and selection order
+
+After a handoff the two endpoints of the same work are renamed to:
+
+```text
+[GPT] original task name
+[DeepSeek] original task name
+```
+
+- The prefix is applied once; repeated handoffs never stack `[GPT] [GPT] ...`.
+- A task you renamed yourself keeps your name and only gets the prefix back.
+- Tagging failures never abort a handoff; they are recorded in the report and
+  retried on the next handoff.
+- The task picker sorts by "last updated" (newest first) by default. Click the
+  `Time / Provider·model / Task / Working directory` headers to change the sort
+  direction; search and checkboxes keep working as before.
 
 ## Why doesn't Codex appear immediately after I click a shortcut?
 
@@ -377,7 +443,8 @@ context. Pin it manually if you want.
 
 ### 4. There are two old tasks with the same name
 
-Early tests or failed handoffs can leave old tasks. Do not judge by the name
+Newer versions prefix paired tasks with `[GPT]` / `[DeepSeek]`. Early tests or
+failed handoffs can leave old tasks without those tags. Do not judge by the name
 alone; open them and confirm which one is newest and can still reply. Do not
 directly modify Codex databases or rollout files.
 
@@ -400,6 +467,24 @@ records.
 The handoff tool only preserves and converts task context; it does not add
 vision capabilities to a model. Whether images work depends on the DeepSeek
 model and API capabilities you selected.
+
+### 8. DeepSeek fails with `input: missing field call_id`
+
+Older versions injected an OpenAI tool-result item that had no `call_id` into
+the DeepSeek task, and DeepSeek rejected the whole request
+(`input: missing field call_id`).
+
+Current versions handle it twice: a handoff no longer writes such items into a
+DeepSeek task, and DeepSeek-mode requests pass through the local adapter, which
+removes those orphan tool results from outgoing DeepSeek requests only. Local
+chat history is untouched. Each removal is logged to:
+
+```text
+%USERPROFILE%\.codex\model-switcher\handoff-logs\adapter-compat-<timestamp>.txt
+```
+
+If a similar error returns after a Codex update, keep that log and the report
+path before troubleshooting further.
 
 ## How to uninstall
 

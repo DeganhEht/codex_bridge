@@ -33,6 +33,7 @@ foreach ($requiredPath in @(
         (Join-Path $threadSource 'data\handoff-settings.json'),
         (Join-Path $threadSource 'package.json'),
         (Join-Path $threadSource 'launcher\codex-desktop-model-launcher.ps1'),
+        (Join-Path $threadSource 'launcher\handoff-result-contract.psm1'),
         (Join-Path $threadSource 'launcher\initialize-handoff.ps1'),
         (Join-Path $threadSource 'launcher\create-handoff-shortcuts.ps1'),
         (Join-Path $threadSource 'launcher\uninstall.ps1'),
@@ -75,6 +76,7 @@ if ($PSCmdlet.ShouldProcess($InstallRoot, '创建 Codex-DeepSeek-Handoff 安装�
 }
 
 Copy-FileChecked (Join-Path $threadSource 'launcher\codex-desktop-model-launcher.ps1') (Join-Path $InstallRoot 'codex-desktop-model-launcher.ps1')
+Copy-FileChecked (Join-Path $threadSource 'launcher\handoff-result-contract.psm1') (Join-Path $InstallRoot 'handoff-result-contract.psm1')
 Copy-FileChecked (Join-Path $threadSource 'launcher\create-gpt-handoff-shortcut.ps1') (Join-Path $InstallRoot 'create-gpt-handoff-shortcut.ps1')
 Copy-FileChecked (Join-Path $threadSource 'launcher\create-handoff-shortcuts.ps1') (Join-Path $InstallRoot 'create-handoff-shortcuts.ps1')
 Copy-FileChecked (Join-Path $threadSource 'launcher\initialize-handoff.ps1') (Join-Path $InstallRoot 'initialize-handoff.ps1')
@@ -114,6 +116,7 @@ $manifest = [ordered]@{
     handoffRoot = (Join-Path $InstallRoot 'thread-localizer')
     files = @(
         'codex-desktop-model-launcher.ps1',
+        'handoff-result-contract.psm1',
         'create-gpt-handoff-shortcut.ps1',
         'create-handoff-shortcuts.ps1',
         'initialize-handoff.ps1',

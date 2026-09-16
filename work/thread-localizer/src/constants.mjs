@@ -6,7 +6,6 @@ export const TOOL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url
 export const PROJECT_ROOT = path.resolve(TOOL_ROOT, "..", "..");
 
 export const DEFAULT_PROVIDER = "openai";
-export const DEEPSEEK_PROVIDER = "deepseek";
 export const DEEPSEEK_MODEL = "deepseek-v4-pro";
 export const USER_THREAD_SOURCE = "user";
 
@@ -22,8 +21,6 @@ export const CODEX_SCHEMA_CACHE_ROOT = path.resolve(
 );
 export const PROJECT_CWD = path.resolve(process.env.THREAD_LOCALIZER_CWD || PROJECT_ROOT);
 export const SESSION_INDEX_PATH = path.join(CODEX_HOME, "session_index.jsonl");
-export const HANDOFF_MANIFEST_PATH = path.join(TOOL_ROOT, "data", "handoff-manifest.json");
-export const HANDOFF_TEST_MANIFEST_PATH = path.join(TOOL_ROOT, "data", "handoff-test-manifest.json");
 export const BATCH_HANDOFF_MANIFEST_PATH = path.join(TOOL_ROOT, "data", "batch-handoff-manifest.json");
 export const HANDOFF_SETTINGS_PATH = path.join(TOOL_ROOT, "data", "handoff-settings.json");
 export const REPORT_DIR = path.join(TOOL_ROOT, "reports");
@@ -33,7 +30,6 @@ export const REQUIRED_METHODS = [
   "thread/list",
   "thread/read",
   "thread/items/list",
-  "thread/fork",
   "thread/delete",
   "thread/start",
   "thread/inject_items",

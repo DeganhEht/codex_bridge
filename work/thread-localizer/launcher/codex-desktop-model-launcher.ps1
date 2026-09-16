@@ -26,6 +26,8 @@ $installDir = if ($env:CODEX_MODEL_SWITCHER_ROOT) {
 $secretPath = Join-Path $installDir 'deepseek-api-key.dpapi'
 $backupRoot = Join-Path $codexHome 'backups\desktop-model-switcher-switches'
 $handoffLogRoot = Join-Path $installDir 'handoff-logs'
+$lastOpenedPath = Join-Path $handoffLogRoot 'last-opened.json'
+$lastHandoffPath = Join-Path $handoffLogRoot 'last-handoff.json'
 $managedStart = '# >>> Codex desktop model switcher: mode (managed; do not edit)'
 $managedEnd = '# <<< Codex desktop model switcher: mode'
 
@@ -77,6 +79,11 @@ function Resolve-ModelSwitcherRoot {
 
 $handoffToolRoot = Resolve-HandoffToolRoot
 $modelSwitcherRoot = Resolve-ModelSwitcherRoot
+$resultContractModulePath = Join-Path $PSScriptRoot 'handoff-result-contract.psm1'
+if (-not (Test-Path -LiteralPath $resultContractModulePath -PathType Leaf)) {
+    throw "找不到交接结果解析模块：$resultContractModulePath"
+}
+Import-Module -Name $resultContractModulePath -Force
 $modelsPath = Join-Path $modelSwitcherRoot 'models-deepseek.json'
 $pickerModelsPath = Join-Path $modelSwitcherRoot 'models-deepseek-picker.json'
 $keyHelperPath = Join-Path $modelSwitcherRoot 'get-deepseek-key.ps1'
@@ -107,7 +114,7 @@ function Show-HandoffStartedNotice {
     try {
         $popup = New-Object -ComObject WScript.Shell
         [void]$popup.Popup(
-            "正在准备交接到 $providerName。完成后会自动打开 Codex，重复点击不会创建新任务。",
+            "正在准备交接到 $providerName。完成后会自动打开目标任务；只想打开、不交接时，请在选择器里选「仅打开 Codex（继续当前模式）」。重复点击不会创建新任务。",
             2,
             'Codex 任务交接',
             64
@@ -254,6 +261,7 @@ function Start-ModelNameAdapter {
         '--port', [string]$port,
         '--upstream', $upstream,
         '--settings', $handoffSettingsPath,
+        '--log-dir', $handoffLogRoot,
         '--parent-pid', [string]$PID
     )
     $process = Start-Process -FilePath (Find-NodeExecutable) -ArgumentList $arguments -WindowStyle Hidden -PassThru `
@@ -274,8 +282,297 @@ function Start-ModelNameAdapter {
     throw "DeepSeek 模型名称适配器启动失败。`n$details"
 }
 
-function Invoke-BatchHandoff {
+function Invoke-TaskInventory {
     param([string]$TargetProvider)
+    New-Item -ItemType Directory -Path $handoffLogRoot -Force | Out-Null
+    $inventoryTimestamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+    $stdoutPath = Join-Path $handoffLogRoot "inventory.$inventoryTimestamp.stdout.json"
+    $stderrPath = Join-Path $handoffLogRoot "inventory.$inventoryTimestamp.stderr.txt"
+    $engineProvider = if ($TargetProvider -eq 'gpt') { 'openai' } else { $TargetProvider }
+    $arguments = @($handoffCliPath, 'batch-inventory', '--target-provider', $engineProvider)
+
+    $savedCodexBin = $env:CODEX_BIN
+    $savedHome = $env:HOME
+    $savedCodexHome = $env:CODEX_HOME
+    $env:CODEX_BIN = Find-CodexExecutable
+    if (-not $env:HOME) { $env:HOME = $env:USERPROFILE }
+    $env:CODEX_HOME = $codexHome
+    try {
+        $process = Start-Process -FilePath (Find-NodeExecutable) `
+            -ArgumentList $arguments `
+            -WorkingDirectory $handoffToolRoot `
+            -WindowStyle Hidden `
+            -Wait `
+            -PassThru `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
+    } finally {
+        if ($null -eq $savedCodexBin) { Remove-Item Env:CODEX_BIN -ErrorAction SilentlyContinue } else { $env:CODEX_BIN = $savedCodexBin }
+        if ($null -eq $savedHome) { Remove-Item Env:HOME -ErrorAction SilentlyContinue } else { $env:HOME = $savedHome }
+        if ($null -eq $savedCodexHome) { Remove-Item Env:CODEX_HOME -ErrorAction SilentlyContinue } else { $env:CODEX_HOME = $savedCodexHome }
+    }
+    if ($process.ExitCode -ne 0) {
+        $details = if (Test-Path -LiteralPath $stderrPath) { (Get-Content -LiteralPath $stderrPath -Tail 12) -join [Environment]::NewLine } else { '' }
+        throw "读取任务列表失败。`n$details"
+    }
+    try {
+        $inventory = Get-Content -LiteralPath $stdoutPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        return @($inventory.tasks)
+    } finally {
+        Remove-Item -LiteralPath $stdoutPath,$stderrPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function ConvertTo-HandoffPickerEntry {
+    param([Parameter(Mandatory = $true)][object]$Task)
+
+    $time = ''
+    $sortTime = 0
+    $hasTime = $false
+    try {
+        $rawTime = [double]$Task.updatedAt
+        if ($rawTime -gt 100000000000) { $rawTime = $rawTime / 1000 }
+        if ($rawTime -gt 0) {
+            $hasTime = $true
+            $sortTime = $rawTime
+            $time = [DateTimeOffset]::FromUnixTimeSeconds([int64]$rawTime).ToLocalTime().ToString('yyyy-MM-dd HH:mm')
+        }
+    } catch { }
+    [pscustomobject]@{
+        Id = [string]$Task.id
+        StableTaskId = [string]$Task.stableTaskId
+        DisplayName = [string]$Task.displayName
+        Text = "[$time] [$($Task.provider)/$($Task.model)] $($Task.displayName)  |  $($Task.cwd)"
+        Provider = [string]$Task.provider
+        Model = [string]$Task.model
+        Cwd = [string]$Task.cwd
+        UpdatedAt = $Task.updatedAt
+        TimeText = $time
+        SortTime = $sortTime
+        HasTime = $hasTime
+    }
+}
+
+function Sort-HandoffPickerEntries {
+    param(
+        [object[]]$Entries = @(),
+        [string]$SortKey = 'time',
+        [bool]$Descending = $true
+    )
+
+    $decorated = foreach ($entry in @($Entries)) {
+        $primary = switch ($SortKey) {
+            'provider' { "$($entry.Provider)/$($entry.Model)" }
+            'name' { [string]$entry.DisplayName }
+            'cwd' { [string]$entry.Cwd }
+            default {
+                if ($entry.HasTime) { [double]$entry.SortTime } else { -1 }
+            }
+        }
+        [pscustomobject]@{ Entry = $entry; Primary = $primary }
+    }
+    $sorted = @($decorated | Sort-Object -Property `
+        @{ Expression = { $_.Primary }; Descending = $Descending }, `
+        @{ Expression = { $_.Entry.DisplayName }; Descending = $false })
+    return @($sorted | ForEach-Object { $_.Entry })
+}
+
+function Get-HandoffPickerHeader {
+    param(
+        [string]$Title,
+        [string]$SortKey,
+        [string]$ActiveSortKey,
+        [bool]$Descending
+    )
+
+    if ($SortKey -ne $ActiveSortKey) { return $Title }
+    if ($Descending) { return "$Title ▼" }
+    return "$Title ▲"
+}
+
+function Select-HandoffTask {
+    param([string]$TargetProvider)
+
+    $tasks = @(Invoke-TaskInventory -TargetProvider $TargetProvider | Where-Object {
+        [bool]$_.managed -and
+        [string]$_.status -notin @('active', 'inProgress')
+    })
+
+    $entries = @($tasks | ForEach-Object { ConvertTo-HandoffPickerEntry -Task $_ })
+
+    $form = New-Object Windows.Forms.Form
+    $form.Text = "选择要交接到 $TargetProvider 的任务"
+    $form.StartPosition = 'CenterScreen'
+    $form.FormBorderStyle = 'Sizable'
+    $form.MinimizeBox = $false
+    $form.ClientSize = New-Object Drawing.Size(1080, 640)
+
+    $label = New-Object Windows.Forms.Label
+    $label.Text = if ($entries.Count -gt 0) {
+        ('找到 {0} 个可交接端点。可多选；勾选后按「交接选中任务」，或直接选「仅打开 Codex（继续当前模式）」。' -f $entries.Count)
+    } else {
+        '当前没有可交接的端点。可以点「仅打开 Codex（继续当前模式）」直接进入 Codex。'
+    }
+    $label.AutoSize = $false
+    $label.Location = New-Object Drawing.Point(14, 12)
+    $label.Size = New-Object Drawing.Size(1045, 34)
+    $form.Controls.Add($label)
+
+    $search = New-Object Windows.Forms.TextBox
+    $search.Location = New-Object Drawing.Point(14, 52)
+    $search.Size = New-Object Drawing.Size(1045, 25)
+    $search.PlaceholderText = '搜索任务名、provider、模型或路径'
+    $form.Controls.Add($search)
+
+    $list = New-Object Windows.Forms.ListView
+    $list.Location = New-Object Drawing.Point(14, 86)
+    $list.Size = New-Object Drawing.Size(1045, 476)
+    $list.View = [Windows.Forms.View]::Details
+    $list.CheckBoxes = $true
+    $list.FullRowSelect = $true
+    $list.GridLines = $true
+    $list.HideSelection = $false
+    $list.MultiSelect = $false
+    $list.Font = New-Object Drawing.Font('Consolas', 9)
+    [void]$list.Columns.Add('时间', 125)
+    [void]$list.Columns.Add('Provider/模型', 180)
+    [void]$list.Columns.Add('任务', 360)
+    [void]$list.Columns.Add('工作目录', 360)
+    $form.Controls.Add($list)
+
+    # 默认按最近更新时间倒序；点击列头可在同一列切换升降序。
+    $columnTitles = @('时间', 'Provider/模型', '任务', '工作目录')
+    $columnKeys = @('time', 'provider', 'name', 'cwd')
+    $sortState = @{ Key = 'time'; Descending = $true }
+
+    $selectedLabel = New-Object Windows.Forms.Label
+    $selectedLabel.Location = New-Object Drawing.Point(14, 575)
+    $selectedLabel.Size = New-Object Drawing.Size(180, 34)
+    $form.Controls.Add($selectedLabel)
+
+    $checked = @{}
+    $syncChecked = {
+        foreach ($item in $list.Items) {
+            $checked[[string]$item.Tag] = [bool]$item.Checked
+        }
+    }
+    $updateHeaders = {
+        for ($index = 0; $index -lt $columnTitles.Count; $index++) {
+            $list.Columns[$index].Text = Get-HandoffPickerHeader `
+                -Title $columnTitles[$index] `
+                -SortKey $columnKeys[$index] `
+                -ActiveSortKey $sortState['Key'] `
+                -Descending $sortState['Descending']
+        }
+    }
+    $renderList = {
+        & $syncChecked
+        $list.BeginUpdate()
+        try {
+            $list.Items.Clear()
+            $filter = [string]$search.Text
+            $visible = @($entries | Where-Object {
+                if (-not $filter) { return $true }
+                return $_.Text.IndexOf($filter, [StringComparison]::OrdinalIgnoreCase) -ge 0
+            })
+            $sorted = @(Sort-HandoffPickerEntries -Entries $visible -SortKey $sortState['Key'] -Descending $sortState['Descending'])
+            foreach ($entry in $sorted) {
+                $row = New-Object Windows.Forms.ListViewItem([string]$entry.TimeText)
+                [void]$row.SubItems.Add("$($entry.Provider)/$($entry.Model)")
+                [void]$row.SubItems.Add([string]$entry.DisplayName)
+                [void]$row.SubItems.Add([string]$entry.Cwd)
+                $row.Tag = $entry.Id
+                $row.Checked = $checked.ContainsKey($entry.Id) -and $checked[$entry.Id]
+                [void]$list.Items.Add($row)
+            }
+        } finally {
+            $list.EndUpdate()
+        }
+        $selectedLabel.Text = "已选择 $(@($checked.Keys | Where-Object { $checked[$_] }).Count) 个"
+    }
+    $list.Add_ColumnClick({
+        param($sender, $eventArgs)
+        $keys = @('time', 'provider', 'name', 'cwd')
+        $clickedKey = $keys[$eventArgs.Column]
+        if ($null -eq $clickedKey) { return }
+        if ($sortState['Key'] -eq $clickedKey) {
+            $sortState['Descending'] = -not $sortState['Descending']
+        } else {
+            $sortState['Key'] = $clickedKey
+            $sortState['Descending'] = ($clickedKey -eq 'time')
+        }
+        & $updateHeaders
+        & $renderList
+    })
+    $search.Add_TextChanged({ & $renderList })
+    & $updateHeaders
+    & $renderList
+
+    $ok = New-Object Windows.Forms.Button
+    $ok.Text = '交接选中任务'
+    $ok.Location = New-Object Drawing.Point(808, 575)
+    $ok.Size = New-Object Drawing.Size(140, 34)
+    $ok.Add_Click({
+        & $syncChecked
+        $selected = @($checked.Keys | Where-Object { $checked[$_] } | ForEach-Object { [string]$_ })
+        if ($selected.Count -gt 0) {
+            $form.Tag = [pscustomobject]@{ Mode = 'handoff'; TaskIds = $selected }
+            $form.DialogResult = [Windows.Forms.DialogResult]::OK
+            $form.Close()
+        } else {
+            [Windows.Forms.MessageBox]::Show('请至少勾选一个任务。', '没有选择任务', 'OK', 'Information') | Out-Null
+        }
+    })
+    $form.Controls.Add($ok)
+
+    $openOnly = New-Object Windows.Forms.Button
+    $openOnly.Text = '仅打开 Codex（继续当前模式）'
+    $openOnly.Location = New-Object Drawing.Point(600, 575)
+    $openOnly.Size = New-Object Drawing.Size(200, 34)
+    $openOnly.Add_Click({
+        $form.Tag = [pscustomobject]@{ Mode = 'open-only' }
+        $form.DialogResult = [Windows.Forms.DialogResult]::OK
+        $form.Close()
+    })
+    $form.Controls.Add($openOnly)
+
+    $cancel = New-Object Windows.Forms.Button
+    $cancel.Text = '取消'
+    $cancel.Location = New-Object Drawing.Point(956, 575)
+    $cancel.Size = New-Object Drawing.Size(77, 34)
+    $cancel.DialogResult = [Windows.Forms.DialogResult]::Cancel
+    $form.Controls.Add($cancel)
+    $form.AcceptButton = $ok
+    $form.CancelButton = $cancel
+    $all = New-Object Windows.Forms.Button
+    $all.Text = '全选'
+    $all.Location = New-Object Drawing.Point(200, 575)
+    $all.Size = New-Object Drawing.Size(85, 34)
+    $all.Add_Click({ foreach ($item in $list.Items) { $item.Checked = $true }; & $syncChecked; & $renderList })
+    $form.Controls.Add($all)
+
+    $clear = New-Object Windows.Forms.Button
+    $clear.Text = '清空'
+    $clear.Location = New-Object Drawing.Point(293, 575)
+    $clear.Size = New-Object Drawing.Size(85, 34)
+    $clear.Add_Click({ foreach ($item in $list.Items) { $item.Checked = $false }; & $syncChecked; & $renderList })
+    $form.Controls.Add($clear)
+
+    try {
+        $dialogResult = $form.ShowDialog()
+        if ($dialogResult -eq [Windows.Forms.DialogResult]::OK) { return $form.Tag }
+        return $null
+    } finally {
+        $form.Dispose()
+    }
+}
+
+function Invoke-BatchHandoff {
+    param(
+        [string]$TargetProvider,
+        [string[]]$OnlyTaskIds = @(),
+        [switch]$DryRun
+    )
 
     if (-not (Test-Path -LiteralPath $handoffCliPath)) {
         throw "找不到滚动交接工具：$handoffCliPath"
@@ -286,12 +583,14 @@ function Invoke-BatchHandoff {
     $stderrPath = Join-Path $handoffLogRoot "handoff.$handoffTimestamp.$TargetProvider.stderr.txt"
     $engineProvider = if ($TargetProvider -eq 'gpt') { 'openai' } else { $TargetProvider }
 
+    $batchCommand = if ($DryRun) { 'batch-handoff-dry-run' } else { 'batch-handoff' }
     $arguments = @(
         $handoffCliPath,
-        'batch-handoff',
-        '--execute',
+        $batchCommand,
         '--target-provider', $engineProvider
     )
+    if (-not $DryRun) { $arguments += '--execute' }
+    if ($OnlyTaskIds.Count -gt 0) { $arguments += @('--task-ids', ($OnlyTaskIds -join ',')) }
     $savedCodexBin = $env:CODEX_BIN
     $savedHome = $env:HOME
     $savedCodexHome = $env:CODEX_HOME
@@ -335,20 +634,346 @@ function Invoke-BatchHandoff {
         throw "任务交接到 $TargetProvider 失败。`n$($details -join [Environment]::NewLine)"
     }
     $result = Get-Content -LiteralPath $stdoutPath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($result.summary.failed -gt 0 -or $result.summary.blocked -gt 0) {
+    $contract = ConvertTo-HandoffResultContract -Result $result -DryRun:$DryRun
+    $requestedCount = @($contract.RequestedTaskIds).Count
+    $resolvedCount = @($contract.ResolvedTaskIds).Count
+    $unresolvedCount = @($contract.UnresolvedTaskIds).Count
+    if ($contract.Failed -gt 0 -or $contract.Blocked -gt 0 -or ($requestedCount -gt 0 -and ($unresolvedCount -gt 0 -or $resolvedCount -ne $requestedCount))) {
+        $successCount = if ($DryRun) { $contract.PlannedHandoff } else { $contract.HandedOff }
+        $reportPath = if ([string]::IsNullOrWhiteSpace($contract.ReportPath)) { $stdoutPath } else { $contract.ReportPath }
         throw @"
 任务尚未全部交接到 $TargetProvider，因此 Codex 不会启动。
 
-成功：$($result.summary.handedOff)
-无需交接：$($result.summary.noop)
-阻塞：$($result.summary.blocked)
-失败：$($result.summary.failed)
+成功：$successCount
+无需交接：$($contract.Noop)
+阻塞：$($contract.Blocked)
+失败：$($contract.Failed)
+已解析：$resolvedCount / $requestedCount
+未解析：$unresolvedCount
 
 请根据详细报告处理后，再点击相应的交接快捷方式：
-$($result.resultPath)
+$reportPath
 "@
     }
     return $result
+}
+
+function Get-DesktopTargetThreadIds {
+    param([Parameter(Mandatory = $true)][object]$HandoffResult)
+
+    $ids = New-Object System.Collections.Generic.List[string]
+    foreach ($result in @($HandoffResult.results | Where-Object { $_.status -eq 'handed-off' })) {
+        $threadId = [string]$result.targetThreadId
+        if ($threadId -notmatch '^[0-9a-fA-F-]{36}$') { continue }
+        if (-not $ids.Contains($threadId)) { $ids.Add($threadId) }
+    }
+    foreach ($result in @($HandoffResult.results | Where-Object { $_.status -eq 'noop' })) {
+        $threadId = [string]$result.targetThreadId
+        if ($threadId -notmatch '^[0-9a-fA-F-]{36}$') { continue }
+        if (-not $ids.Contains($threadId)) { $ids.Add($threadId) }
+    }
+    return $ids.ToArray()
+}
+
+function Get-DesktopTargetThreadId {
+    param([Parameter(Mandatory = $true)][object]$HandoffResult)
+
+    $ids = @(Get-DesktopTargetThreadIds -HandoffResult $HandoffResult)
+    if ($ids.Count -eq 0) {
+        throw '交接结果没有可打开的目标任务 ID，Codex 不会启动。'
+    }
+    return [string]$ids[0]
+}
+
+function Sync-CodexSidebarRegistrations {
+    param([Parameter(Mandatory = $true)][object]$HandoffResult)
+
+    # 桌面端只给它自己打开过的线程写侧栏登记项（工作区根提示、projectless 列表、
+    # 可写根）。工具直接创建的端点没有这些登记项时不会出现在侧栏，所以这里把源任务
+    # 的登记项照抄给目标端点。写法是纯增量：已存在的值不覆盖。
+    $statePath = Join-Path $codexHome '.codex-global-state.json'
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+        return [pscustomobject]@{ Applied = $false; Reason = 'state-file-missing'; Synced = @() }
+    }
+    try {
+        $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        return [pscustomobject]@{ Applied = $false; Reason = 'state-file-unreadable'; Synced = @() }
+    }
+
+    $hints = $state.'thread-workspace-root-hints'
+    $writableRoots = $state.'thread-writable-roots'
+    $outputDirectories = $state.'thread-projectless-output-directories'
+    if ($null -eq $hints) {
+        return [pscustomobject]@{ Applied = $false; Reason = 'state-shape-unknown'; Synced = @() }
+    }
+    $projectlessThreadIds = @($state.'projectless-thread-ids')
+
+    $pairs = @($HandoffResult.results | Where-Object {
+        $_.sourceThreadId -and $_.targetThreadId -and ([string]$_.sourceThreadId -ne [string]$_.targetThreadId)
+    })
+    $synced = New-Object System.Collections.Generic.List[object]
+    foreach ($pair in $pairs) {
+        $sourceThreadId = [string]$pair.sourceThreadId
+        $targetThreadId = [string]$pair.targetThreadId
+        if ($targetThreadId -notmatch '^[0-9a-fA-F-]{36}$') { continue }
+        $sourceHint = $hints.PSObject.Properties[$sourceThreadId]
+        if ($null -eq $sourceHint -or -not $sourceHint.Value) { continue }
+        $hint = $sourceHint.Value
+
+        $added = New-Object System.Collections.Generic.List[string]
+        if ($null -eq $hints.PSObject.Properties[$targetThreadId]) {
+            $hints | Add-Member -NotePropertyName $targetThreadId -NotePropertyValue $hint -Force
+            $added.Add('workspaceRootHint')
+        }
+        if ($null -ne $writableRoots) {
+            $sourceWritableRoots = $writableRoots.PSObject.Properties[$sourceThreadId]
+            if ($null -ne $sourceWritableRoots -and $null -eq $writableRoots.PSObject.Properties[$targetThreadId]) {
+                $writableRoots | Add-Member -NotePropertyName $targetThreadId -NotePropertyValue $sourceWritableRoots.Value -Force
+                $added.Add('writableRoots')
+            }
+        }
+        if ($null -ne $outputDirectories) {
+            $sourceOutputDirectory = $outputDirectories.PSObject.Properties[$sourceThreadId]
+            if ($null -ne $sourceOutputDirectory -and $null -eq $outputDirectories.PSObject.Properties[$targetThreadId]) {
+                $outputDirectories | Add-Member -NotePropertyName $targetThreadId -NotePropertyValue $sourceOutputDirectory.Value -Force
+                $added.Add('projectlessOutputDirectory')
+            }
+        }
+        if (($projectlessThreadIds -contains $sourceThreadId) -and -not ($projectlessThreadIds -contains $targetThreadId)) {
+            $projectlessThreadIds = @($projectlessThreadIds + $targetThreadId)
+            $added.Add('projectlessThreadId')
+        }
+        if ($added.Count -gt 0) {
+            $synced.Add([pscustomobject]@{
+                sourceThreadId = $sourceThreadId
+                targetThreadId = $targetThreadId
+                added = $added.ToArray()
+            })
+        }
+    }
+
+    if ($synced.Count -eq 0) {
+        return [pscustomobject]@{ Applied = $false; Reason = 'nothing-to-sync'; Synced = @() }
+    }
+
+    $state.'projectless-thread-ids' = $projectlessThreadIds
+    New-Item -ItemType Directory -Path $handoffLogRoot -Force | Out-Null
+    $syncTimestamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+    $backupPath = Join-Path $handoffLogRoot "codex-global-state.$syncTimestamp.before-sidebar-sync.json"
+    $temporaryPath = Join-Path $codexHome ".codex-global-state.$syncTimestamp.tmp"
+    $utf8NoBom = New-Object Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($temporaryPath, ($state | ConvertTo-Json -Depth 100 -Compress), $utf8NoBom)
+    [IO.File]::Replace($temporaryPath, $statePath, $backupPath, $true)
+    return [pscustomobject]@{
+        Applied = $true
+        Reason = $null
+        Synced = $synced.ToArray()
+        Backup = $backupPath
+    }
+}
+
+function Write-HandoffSummary {
+    param(
+        [Parameter(Mandatory = $true)][object]$HandoffResult,
+        [Parameter(Mandatory = $true)][string]$TargetProvider,
+        [object]$SidebarSync = $null
+    )
+
+    $items = @($HandoffResult.results | Where-Object {
+        $_.status -in @('handed-off', 'noop') -and
+        -not [string]::IsNullOrWhiteSpace([string]$_.targetThreadId)
+    })
+    if ($items.Count -eq 0) { return $null }
+
+    $tasks = @($items | ForEach-Object {
+        $target = [string]$_.targetThreadId
+        $name = if ($_.tagging -and $_.tagging.baseName) { [string]$_.tagging.baseName } else { '' }
+        [ordered]@{
+            stableTaskId = [string]$_.stableTaskId
+            displayName = $name
+            targetThreadId = $target
+            deepLink = "codex://threads/$target"
+            status = [string]$_.status
+        }
+    })
+    $summary = [ordered]@{
+        provider = $TargetProvider
+        at = (Get-Date).ToString('o')
+        count = $tasks.Count
+        handedOff = @($items | Where-Object { $_.status -eq 'handed-off' }).Count
+        noop = @($items | Where-Object { $_.status -eq 'noop' }).Count
+        sidebarSync = $SidebarSync
+        previewBackfill = $HandoffResult.previewBackfill
+        tasks = $tasks
+    }
+    try {
+        New-Item -ItemType Directory -Path $handoffLogRoot -Force | Out-Null
+        $summary | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $lastHandoffPath -Encoding UTF8
+    } catch {
+        # 记录失败不影响打开流程。
+    }
+    return $summary
+}
+
+function Show-HandoffSummaryNotice {
+    param([Parameter(Mandatory = $true)][object]$Summary)
+
+    if ($null -eq $Summary -or [int]$Summary.count -lt 2) { return }
+    $providerName = if ($Summary.provider -eq 'gpt') { 'GPT' } else { 'DeepSeek' }
+    $lines = New-Object System.Collections.Generic.List[string]
+    $lines.Add("已交接到 $providerName 的任务共 $($Summary.count) 个，并已逐个打开（前台是第一个）：")
+    $lines.Add('')
+    foreach ($task in $Summary.tasks) {
+        $label = if ($task.displayName) { $task.displayName } else { $task.stableTaskId }
+        $state = if ($task.status -eq 'noop') { '无需交接' } else { '已交接' }
+        $lines.Add("・$label（$state）")
+        $lines.Add("  $($task.deepLink)")
+    }
+    $lines.Add('')
+    $lines.Add("任务已经全部打开过，侧栏里应能看到它们（按 [$providerName] 前缀识别）；上面的链接也可留作备用。")
+    $text = $lines -join [Environment]::NewLine
+    try {
+        $popup = New-Object -ComObject WScript.Shell
+        [void]$popup.Popup($text, 12, "交接完成：$($Summary.count) 个任务", 64)
+    } catch {
+        # 提示失败不影响打开流程。
+    }
+}
+
+function Open-CodexTargetThread {
+    param(
+        [Parameter(Mandatory = $true)][string]$TargetThreadId,
+        [Parameter(Mandatory = $true)][string]$TargetProvider
+    )
+
+    $targetUri = "codex://threads/$TargetThreadId"
+    try {
+        Start-Process -FilePath $targetUri -ErrorAction Stop | Out-Null
+    } catch {
+        throw "无法打开 $TargetProvider 目标任务 $TargetThreadId。Codex 深链失败：$($_.Exception.Message)"
+    }
+
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline) {
+        if (Get-Process -Name 'ChatGPT' -ErrorAction SilentlyContinue) { return $targetUri }
+        Start-Sleep -Milliseconds 500
+    }
+    throw "Codex 已收到目标任务深链但未在 30 秒内启动：$targetUri"
+}
+
+function Open-CodexTargetThreads {
+    param(
+        [Parameter(Mandatory = $true)][string[]]$ThreadIds,
+        [Parameter(Mandatory = $true)][string]$TargetProvider
+    )
+
+    if ($ThreadIds.Count -eq 0) {
+        throw '交接结果没有可打开的目标任务 ID，Codex 不会启动。'
+    }
+    $primary = [string]$ThreadIds[0]
+    $extras = @($ThreadIds | Select-Object -Skip 1)
+    # 先把其余任务逐个打开，最后再打开第一个：这样侧栏会把每一条都登记一次，
+    # 前台留在本次真正新交接的那条上。
+    foreach ($threadId in $extras) {
+        try {
+            Start-Process -FilePath "codex://threads/$threadId" -ErrorAction Stop | Out-Null
+            Start-Sleep -Milliseconds 1200
+        } catch {
+            # 单条打开失败不阻断其余任务；汇总提示里仍会给出深链。
+        }
+    }
+    $null = Open-CodexTargetThread -TargetThreadId $primary -TargetProvider $TargetProvider
+    return @($ThreadIds)
+}
+
+function Write-LastOpenedRecord {
+    param(
+        [Parameter(Mandatory = $true)][string]$Mode,
+        [string]$ThreadId = '',
+        [string[]]$ThreadIds = @()
+    )
+
+    try {
+        New-Item -ItemType Directory -Path $handoffLogRoot -Force | Out-Null
+        $allThreadIds = @($ThreadIds | Where-Object { $_ } | ForEach-Object { [string]$_ })
+        if ($allThreadIds.Count -eq 0 -and $ThreadId) { $allThreadIds = @([string]$ThreadId) }
+        [ordered]@{
+            provider = $Mode
+            threadId = if ($ThreadId) { $ThreadId } else { $null }
+            threadIds = $allThreadIds
+            at = (Get-Date).ToString('o')
+        } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $lastOpenedPath -Encoding UTF8
+    } catch {
+        # 记录失败不影响打开流程。
+    }
+}
+
+function Get-LastOpenedThreadId {
+    param([Parameter(Mandatory = $true)][string]$Mode)
+
+    if (-not (Test-Path -LiteralPath $lastOpenedPath -PathType Leaf)) { return $null }
+    try {
+        $record = Get-Content -LiteralPath $lastOpenedPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+    if ([string]$record.provider -ne $Mode) { return $null }
+    $threadId = [string]$record.threadId
+    if ($threadId -notmatch '^[0-9a-fA-F-]{36}$') { return $null }
+    return $threadId
+}
+
+function Open-CodexPlain {
+    $savedErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $launchOutput = & (Find-CodexExecutable) app 2>&1
+    # Native applications may write ordinary status text to stderr. In
+    # Windows PowerShell that can make `$?` false even when the native
+    # process exited successfully, so only trust the native exit code.
+    $launchExit = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
+    $ErrorActionPreference = $savedErrorActionPreference
+    $reportedOpening = (@($launchOutput | ForEach-Object { "$_" }) -join "`n") -match 'Opening workspace .+ in the Desktop app'
+    if ($launchExit -ne 0 -and -not $reportedOpening) {
+        $launchDetails = @($launchOutput | Select-Object -Last 5 | ForEach-Object { "$_" }) -join [Environment]::NewLine
+        throw "Codex 官方 app 启动命令返回错误 $launchExit。`n$launchDetails"
+    }
+    return $true
+}
+
+function Open-CodexForMode {
+    param(
+        [Parameter(Mandatory = $true)][ValidateSet('gpt', 'deepseek')][string]$Mode,
+        [switch]$PreferLastOpened
+    )
+
+    $adapter = $null
+    if ($Mode -eq 'deepseek') {
+        $adapter = Start-ModelNameAdapter
+    }
+
+    $threadId = $null
+    if ($PreferLastOpened) {
+        $threadId = Get-LastOpenedThreadId -Mode $Mode
+    }
+    if ($threadId) {
+        try {
+            $null = Open-CodexTargetThread -TargetThreadId $threadId -TargetProvider $Mode
+        } catch {
+            $threadId = $null
+        }
+    }
+    if (-not $threadId) {
+        $null = Open-CodexPlain
+    } else {
+        Write-LastOpenedRecord -Mode $Mode -ThreadId $threadId
+    }
+
+    return [pscustomobject]@{
+        Mode = $Mode
+        ThreadId = $threadId
+        Adapter = $adapter
+    }
 }
 
 function New-ModeBlock {
@@ -406,6 +1031,23 @@ function Set-CandidateMode {
     if ($baseUrlMatches.Count -ne 1) { throw 'DeepSeek provider 应当恰好包含一个 base_url。' }
     $newBody = [regex]::Replace($providerBody, '(?m)^\s*base_url\s*=.*$', "base_url = `"$baseUrl`"", 1)
     return $candidate.Substring(0, $providerMatch.Groups[2].Index) + $newBody + $candidate.Substring($providerMatch.Groups[2].Index + $providerMatch.Groups[2].Length)
+}
+
+function Get-CurrentMode {
+    param([Parameter(Mandatory = $true)][string]$RawConfig)
+
+    $pattern = "(?ms)^$([regex]::Escape($managedStart))\r?\n(?<body>.*?)^$([regex]::Escape($managedEnd))"
+    $match = [regex]::Match($RawConfig, $pattern)
+    if (-not $match.Success) { return $null }
+
+    $body = $match.Groups['body'].Value
+    $modeMatch = [regex]::Match($body, '(?m)^\s*#?\s*active_mode\s*=\s*([A-Za-z]+)')
+    if ($modeMatch.Success) {
+        $mode = $modeMatch.Groups[1].Value.ToLowerInvariant()
+        if ($mode -in @('gpt', 'deepseek')) { return $mode }
+    }
+    if ([regex]::IsMatch($body, '(?m)^\s*model_provider\s*=\s*"deepseek"')) { return 'deepseek' }
+    return 'gpt'
 }
 
 function Test-CandidateConfig {
@@ -498,6 +1140,8 @@ function Save-DeepSeekKey {
 }
 
 function Restore-GptMode {
+    # 正常交接（DeepSeek → GPT）走上面的候选配置写入路径；这里只保留给
+    # 「不交接、仅恢复 GPT 配置」的人工恢复场景，启动器不再自动调用。
     $currentConfig = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8
     $gptConfig = Set-CandidateMode -RawConfig $currentConfig -Mode 'gpt'
     $restoreTimestamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
@@ -572,12 +1216,17 @@ try {
     Build-DeepSeekPickerCatalog
 
     $rawConfig = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8
+    $currentMode = Get-CurrentMode -RawConfig $rawConfig
+    if (-not $currentMode) {
+        throw '无法从 config.toml 的受管模式区块判断当前模式（区块缺失或被改动）。为避免误改配置，已停止。'
+    }
     $candidate = Set-CandidateMode -RawConfig $rawConfig -Mode $Provider
     Test-CandidateConfig $candidate
 
     if ($ValidateOnly) {
         [ordered]@{
             provider = $Provider
+            current_mode = $currentMode
             config_valid = $true
             config_would_change = ($candidate -cne $rawConfig)
         } | ConvertTo-Json
@@ -594,12 +1243,30 @@ Codex 桌面应用仍在运行。
         exit 2
     }
 
-    if ($Provider -eq 'deepseek' -and -not (Test-Path -LiteralPath $secretPath)) {
+    if (($Provider -eq 'deepseek' -or $currentMode -eq 'deepseek') -and -not (Test-Path -LiteralPath $secretPath)) {
         $deepSeekKey = Request-DeepSeekKey
         if (-not $deepSeekKey) { exit 0 }
         Save-DeepSeekKey $deepSeekKey
         $deepSeekKey = $null
     }
+
+    $selection = Select-HandoffTask -TargetProvider $Provider
+    if ($null -eq $selection) { exit 0 }
+
+    if ($selection.Mode -eq 'open-only') {
+        $openResult = Open-CodexForMode -Mode $currentMode -PreferLastOpened
+        $modelAdapter = $openResult.Adapter
+        if ($currentMode -eq 'deepseek') {
+            # 保持适配器存活到 Codex 退出；退出后由 finally 停止适配器，配置保持 DeepSeek 不变。
+            Wait-For-CodexToExit
+        }
+        exit 0
+    }
+
+    $selectedTaskIds = @($selection.TaskIds)
+    if ($selectedTaskIds.Count -eq 0) { exit 0 }
+
+    $handoffPreflight = Invoke-BatchHandoff -TargetProvider $Provider -OnlyTaskIds $selectedTaskIds -DryRun
 
     New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
     $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
@@ -614,25 +1281,18 @@ Codex 桌面应用仍在运行。
         if ($Provider -eq 'deepseek') {
             $modelAdapter = Start-ModelNameAdapter
         }
-        $null = Invoke-BatchHandoff -TargetProvider $Provider
-        $savedErrorActionPreference = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        $launchOutput = & (Find-CodexExecutable) app 2>&1
-        # Native applications may write ordinary status text to stderr. In
-        # Windows PowerShell that can make `$?` false even when the native
-        # process exited successfully, so only trust the native exit code.
-        $launchExit = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }
-        $ErrorActionPreference = $savedErrorActionPreference
-        $reportedOpening = (@($launchOutput | ForEach-Object { "$_" }) -join "`n") -match 'Opening workspace .+ in the Desktop app'
-        if ($launchExit -ne 0 -and -not $reportedOpening) {
-            $launchDetails = @($launchOutput | Select-Object -Last 5 | ForEach-Object { "$_" }) -join [Environment]::NewLine
-            throw "Codex 官方 app 启动命令返回错误 $launchExit。`n$launchDetails"
-        }
+        $handoffResult = Invoke-BatchHandoff -TargetProvider $Provider -OnlyTaskIds $selectedTaskIds
+        $sidebarSync = Sync-CodexSidebarRegistrations -HandoffResult $handoffResult
+        $handoffSummary = Write-HandoffSummary -HandoffResult $handoffResult -TargetProvider $Provider -SidebarSync $sidebarSync
+        $targetThreadIds = @(Get-DesktopTargetThreadIds -HandoffResult $handoffResult)
+        $null = Open-CodexTargetThreads -ThreadIds $targetThreadIds -TargetProvider $Provider
+        Write-LastOpenedRecord -Mode $Provider -ThreadId $targetThreadIds[0] -ThreadIds $targetThreadIds
+        Show-HandoffSummaryNotice -Summary $handoffSummary
 
         if ($Provider -eq 'deepseek') {
+            # 关闭 DeepSeek 模式的 Codex 不再自动写配置、不再自动回程：
+            # 等 Codex 退出后停止适配器并直接退出，config.toml 保持 DeepSeek。
             Wait-For-CodexToExit
-            Restore-GptMode
-            $null = Invoke-BatchHandoff -TargetProvider 'openai'
         }
     } catch {
         Copy-Item -LiteralPath $backupPath -Destination $configPath -Force

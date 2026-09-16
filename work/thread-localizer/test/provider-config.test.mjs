@@ -12,7 +12,7 @@ const settings = {
     deepseek: {
       activeModel: "deepseek-v4-pro",
       modelAliases: {
-        "deepseek-v4-flash": "gpt-5.6-terra",
+        "deepseek-flash": "gpt-5.6-terra",
         "deepseek-v4-pro": "gpt-5.6-sol",
       },
       modelPolicy: "preserve-existing",
@@ -29,7 +29,7 @@ test("new DeepSeek tasks default to the UI-compatible Pro alias plus Max", () =>
 
 test("DeepSeek handoff restores the task's last model and effort", () => {
   const task = {
-    providerModels: { deepseek: "deepseek-v4-flash" },
+      providerModels: { deepseek: "deepseek-flash" },
     providerReasoningEfforts: { deepseek: "low" },
   };
   assert.equal(resolveTargetModel(settings, "deepseek", task), "gpt-5.6-terra");

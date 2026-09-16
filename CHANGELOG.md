@@ -2,6 +2,49 @@
 
 All notable changes to this project are recorded here.
 
+## 1.2.0 - 2026-09-16
+
+Derivative release based on
+[kaidongli30-cpu/Codex-Deepseek-Handoff](https://github.com/kaidongli30-cpu/Codex-Deepseek-Handoff)
+(MIT, Copyright (c) 2026 kaidongli30-cpu). The upstream MIT license and copyright
+notice are kept unchanged in `LICENSE`.
+
+- Replaced one-shot copies with persistent paired endpoints: one GPT endpoint and
+  one DeepSeek endpoint per logical task, synchronized by delta with cursors,
+  fingerprints, duplicate-block detection and partial-write guards.
+- Desktop launcher: multi-task selection with sortable columns, an
+  "only open Codex" entry, reopening every selected target after a handoff,
+  `last-handoff.json` / `last-opened.json` records, and a shared result contract.
+- Endpoint tagging through the official `thread/name/set`: `[GPT]` / `[DeepSeek]`
+  prefixes, applied once, preserving manual renames, plus a `tag-pairs` command.
+- DeepSeek compatibility: the local model-name adapter now honors
+  `HTTPS_PROXY` / `HTTP_PROXY` (with proxy auth and `NO_PROXY`), drops orphan
+  tool-result items that DeepSeek rejects (`missing field call_id`), logs each
+  drop, and exposes `proxyConfigured` / `proxyRequests` in its health response.
+- Sidebar visibility: copies the desktop client's per-thread registration
+  (workspace-root hint, projectless list, writable roots) and backfills
+  `preview` / `first_user_message` / `title` for tool-created endpoints, because
+  the sidebar's fast list skips threads without a preview. The preview backfill
+  writes only empty columns, backs up `state_5.sqlite` first, verifies by
+  reading back, and restores the backup on mismatch.
+- Shutdown safety: closing DeepSeek-mode Codex no longer rewrites the config or
+  runs an automatic return handoff; the launcher stops the adapter and exits.
+- Recovery: `pair-repair` clean rebuild, projection-only delta handling, tolerant
+  handling of deltas that contain no injectable Responses items, and explicit
+  failure reasons in reports.
+- Testing: 53 Node tests plus PowerShell suites for the picker, sidebar
+  registration, result contract and install layout; CI workflow kept from
+  upstream.
+- Removed the upstream single-endpoint leftovers that the paired workflow never
+  uses: the `cleanup-generated-history` tool, the rolling-handoff CLI path, the
+  legacy single-task manifest recording (and its test manifest), and five dead
+  helpers, plus handoff options that no longer had any reader
+  (`emitDryRun`, `recordManifest`). Net effect is roughly 400 fewer lines to
+  maintain.
+- Renamed the desktop entries to `交接给deepseek.lnk` and `交接给GPT.lnk`
+  (the previous `DeepSeek交接.lnk` / `任务交接GPT.lnk` are now cleaned up as
+  legacy names), and updated all docs to match.
+
 ## Unreleased
 
 - Prepared the project for a public, local-first release.

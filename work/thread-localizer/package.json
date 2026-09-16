@@ -1,6 +1,6 @@
 {
   "name": "codex-thread-localizer",
-  "version": "0.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "description": "Hand off local Codex desktop tasks between OpenAI and DeepSeek through the app-server protocol.",
@@ -16,3 +16,4 @@
     "verify": "node src/cli.mjs verify"
   }
 }
+

@@ -7,6 +7,33 @@
 > 这是一个目前只支持 Windows 的本地任务交接工具。第一次使用命令行也没关系，
 > 下面会从“怎么下载项目”开始，一步一步说明。
 
+## 来源与致谢
+
+本项目基于 [kaidongli30-cpu/Codex-Deepseek-Handoff](https://github.com/kaidongli30-cpu/Codex-Deepseek-Handoff)
+（MIT License，Copyright (c) 2026 kaidongli30-cpu）深度改造而来：上游提供了
+「把 GPT 任务交给 DeepSeek 继续」的基础与安装流程，本仓库在其之上把交接改成
+**固定双端点增量同步**，并补齐了桌面端可用性与排障细节。
+
+相对上游的主要改动（详见 [CHANGELOG.md](CHANGELOG.md)）：
+
+- 固定双端点：每个逻辑任务保留一个 GPT 端点与一个 DeepSeek 端点，只同步新增内容，
+  不再反复创建新任务。
+- 桌面启动器：一次交接多个任务、按时间排序的多选界面、`仅打开 Codex`、
+  交接后逐个打开目标任务，并记录 `last-handoff.json` / `last-opened.json`。
+- 端点标记：自动加 `[GPT]` / `[DeepSeek]` 前缀，同时保留你手动改过的名字。
+- 兼容性：模型名适配器支持 `HTTPS_PROXY` / `HTTP_PROXY`，并清洗 DeepSeek 无法接受的
+  无主工具结果项（缺 `call_id`）。
+- 侧栏可见性：补齐桌面端侧栏登记与 `preview`，让交接生成的任务能直接出现在侧栏。
+- 关机安全：关闭 DeepSeek 模式的 Codex 后不再自动改配置或自动回程；同步只发生在
+  你点击快捷方式并选择任务时。
+
+第三方资源说明：DeepSeek 的官方模型目录与官方 Codex 接入脚本由用户本机自行安装，
+本仓库**不再分发**这些官方文件，也不分发 DeepSeek 品牌图标；安装器只复用你本机已经
+完成的官方接入结果。这些内容的所有权归 DeepSeek 官方所有。
+
+维护者：本仓库的改造与维护由 `DeganhEht` 完成；原始项目与设计思路来自
+上表中的上游仓库，特此致谢。
+
 ## 这个项目解决什么问题？
 
 DeepSeek 官方已经提供了接入 Codex 的方式，但切换配置后，经常会出现这样的情况：
@@ -15,24 +42,24 @@ DeepSeek 官方已经提供了接入 Codex 的方式，但切换配置后，经�
 - DeepSeek 新回复的内容，切回 GPT 后不能接着使用；
 - DeepSeek 产生的推理记录或联网搜索记录，可能让 GPT 报格式错误。
 
-本项目在 GPT 和 DeepSeek 之间增加了一层本地“任务交接”。直观过程如下：
+本项目在 GPT 和 DeepSeek 之间增加了一层本地“任务交接”。每个逻辑任务会保留一个 GPT 端点和一个 DeepSeek 端点，后续只同步新增内容，不会每次都复制出新任务。直观过程如下：
 
 ```text
 在 GPT 中工作
     ↓
 完全关闭 Codex
     ↓
-点击桌面的“DeepSeek交接”
+点击桌面的“交接给deepseek”
     ↓
-工具先交接任务，再打开 DeepSeek 模式的 Codex
+工具第一次建立 DeepSeek 配对任务，再打开 DeepSeek 模式的 Codex
     ↓
 在 DeepSeek 中继续原任务
     ↓
 完全关闭 Codex
     ↓
-点击桌面的“任务交接GPT”
+点击桌面的“交接给GPT”
     ↓
-工具先清理并交接任务，再打开 GPT 模式的 Codex
+工具把 DeepSeek 新增内容同步回原 GPT 配对任务，再打开 GPT 模式的 Codex
 ```
 
 两边看到的是同一个工作过程的接力版本。DeepSeek 的回复可以交回 GPT，GPT 的
@@ -124,7 +151,7 @@ node --version
 
 ### 方法 A：下载 ZIP（推荐新手使用）
 
-1. 打开本项目的 GitHub 页面。
+1. 打开本仓库页面：<https://github.com/DeganhEht/codex_bridge>
 2. 点击页面上方绿色的 `Code` 按钮。
 3. 点击 `Download ZIP`。
 4. 下载完成后，在资源管理器中找到这个 ZIP 文件。
@@ -253,16 +280,16 @@ pwsh -NoProfile -ExecutionPolicy Bypass `
 安装成功后，桌面上应该出现：
 
 ```text
-DeepSeek交接
-任务交接GPT
+交接给deepseek
+交接给GPT
 ```
 
 它们的作用分别是：
 
 | 快捷方式 | 什么时候点击 | 会做什么 |
 | --- | --- | --- |
-| `DeepSeek交接` | 当前使用 GPT，下一次想用 DeepSeek | 先把 GPT 任务交给 DeepSeek，再打开 Codex |
-| `任务交接GPT` | 当前使用 DeepSeek，下一次想回到 GPT | 先清理并交接 DeepSeek 任务，再打开 Codex |
+| `交接给deepseek` | 当前使用 GPT，下一次想用 DeepSeek | 先把 GPT 任务交给 DeepSeek，再打开 Codex |
+| `交接给GPT` | 当前使用 DeepSeek，下一次想回到 GPT | 先清理并交接 DeepSeek 任务，再打开 Codex |
 
 ## 第一次进行任务交接
 
@@ -280,37 +307,76 @@ DeepSeek交接
 3. 等 GPT 回复完成。
 4. 完全关闭 Codex。
 5. 等待几秒，确认 Codex 窗口已经全部消失。
-6. 双击桌面的 `DeepSeek交接`。
-7. **只点击一次，然后等待。**
-8. 交接完成后，Codex 会自动以 DeepSeek 配置打开。
-9. 在“最近”或对应项目中找到刚才的测试任务。
-10. 确认能看到 GPT 的测试消息和回复。
-11. 在同一个任务中让 DeepSeek 再回复一句。
+6. 双击桌面的 `交接给deepseek`。
+7. 在弹出的选择器里勾选刚才的测试任务，点“交接选中任务”。
+8. **只点击一次，然后等待。**交接完成后，Codex 会自动以 DeepSeek 配置打开
+   这个任务。
+9. 确认能看到 GPT 的测试消息和回复。
+10. 在同一个任务中让 DeepSeek 再回复一句。
+11. 用完直接关闭 Codex 即可：工具不会自动改配置、不会自动回程，关机也安全。
 
 ### 从 DeepSeek 切回 GPT
 
 1. 等 DeepSeek 回复完全结束。
 2. 完全关闭 Codex。
 3. 等待几秒。
-4. 双击桌面的 `任务交接GPT`。
-5. **只点击一次，然后等待。**
-6. 工具会先处理 DeepSeek 与 GPT 不兼容的推理和联网搜索记录。
-7. 完成后，Codex 会自动回到 GPT 登录配置。
-8. 打开刚才的测试任务。
-9. 确认能看到 DeepSeek 刚刚发送的内容。
-10. 再给 GPT 发送一条消息，确认 GPT 能正常回复。
+4. 双击桌面的 `交接给GPT`。
+5. 在选择器里勾选要带回 GPT 的任务（包括在 DeepSeek 里新产生的对话），
+   点“交接选中任务”。
+6. **只点击一次，然后等待。**工具会先处理 DeepSeek 与 GPT 不兼容的推理和
+   联网搜索记录，再把 Codex 以 GPT 配置打开。
+7. 确认能看到 DeepSeek 刚刚发送的内容。
+8. 再给 GPT 发送一条消息，确认 GPT 能正常回复。
 
 以上全部通过，就说明双向任务交接已经跑通。
 
 ## 日常应该怎么用？
 
-以后只需要记住下面两条：
+两个快捷方式代表“目标模式”，都支持**只打开、不交接**：
 
-- **GPT → DeepSeek：**关闭 Codex，点击 `DeepSeek交接`。
-- **DeepSeek → GPT：**关闭 Codex，点击 `任务交接GPT`。
+- **`交接给deepseek`：**关闭 Codex 后点击。选择器会列出 GPT 侧任务，勾选后交接、
+  写入 DeepSeek 配置、启动本机适配器并打开 Codex（DeepSeek 模式）；
+  也可以直接点 **“仅打开 Codex（继续当前模式）”**，只启动适配器并打开上次那条
+  任务。
+- **`交接给GPT`：**关闭 Codex 后点击。选择器会列出所有 DeepSeek 侧任务
+  （包括在 DeepSeek 模式里新产生的对话），勾选后同步并打开 Codex（GPT 模式）。
+
+一次勾选多个任务时：本次选中的每个任务都会被**逐个打开一次**，这样它们都会
+出现在 Codex 侧栏（按 `[GPT]` / `[DeepSeek]` 前缀可以找到），最后前台停在本轮
+真正新交接的那条上。凡是本次处理了 2 个及以上任务，都会弹出一个汇总提示，
+列出每个任务的名字和 `codex://threads/...` 链接；同样的内容也会写进
+`%USERPROFILE%\.codex\model-switcher\handoff-logs\last-handoff.json`。
 
 不要在刚用完 DeepSeek 后直接点击任务栏里的官方 Codex 图标。那样会绕过交接
 步骤，刚产生的 DeepSeek 内容可能暂时没有出现在 GPT 任务中。
+
+### 关机与重新打开
+
+- **关闭 DeepSeek 模式的 Codex 不会触发任何自动动作：**工具只停掉本机适配器，
+  保持 `config.toml` 现状后退出，不写配置、不重开窗口、不做同步。因此
+  “关闭 Codex → 直接关机”随时安全。
+- 同步只发生在你点快捷方式并勾选任务的那一刻，不存在“关机打断同步”的问题。
+- 重新打开时，点对应快捷方式再选 **“仅打开 Codex（继续当前模式）”** 即可：
+  它会优先用深链恢复上次打开的那条任务；没有记录时退回普通启动。
+- 关闭 DeepSeek 模式的 Codex 之后，适配器已经退出：如果这时改用任务栏里的
+  官方 Codex 图标，配置仍是 DeepSeek 但没有适配器，请求会失败。要用 DeepSeek
+  就一律走 `交接给deepseek`。
+
+### 任务名标记与选择顺序
+
+交接完成后，同一件事的两个任务会分别改名为：
+
+```text
+[GPT] 原来的任务名
+[DeepSeek] 原来的任务名
+```
+
+- 前缀只加一次，重复交接不会变成 `[GPT] [GPT] ...`。
+- 如果你自己改过任务名，下次交接会保留你改的名字，只重新加前缀。
+- 标记失败不会中断交接，只会在报告里记录，下次交接再补。
+- 打开任务选择器时，默认按“最近更新”倒序排列（最新的在最上面）；点击
+  「时间 / Provider·模型 / 任务 / 工作目录」表头可以切换排序方向，
+  搜索框和复选框照旧可用。
 
 ## 为什么点击快捷方式后没有立刻出现 Codex？
 
@@ -323,11 +389,14 @@ DeepSeek交接
 3. 创建新的目标任务；
 4. 转换不兼容的记录；
 5. 完整验证交接结果；
-6. 验收成功后删除上一棒旧任务；
+6. 记录交接结果（配对模式保留两端任务，不删除原任务）；
 7. 最后才打开 Codex。
 
 任务越多，等待时间可能越长。交接期间再次点击快捷方式不会让它更快，也可能让
 你误以为程序没有反应，所以请耐心等待第一次点击的结果。
+
+如果选的是 **“仅打开 Codex（继续当前模式）”**，上面的交接步骤全部跳过，
+只会多花 1–2 秒启动 DeepSeek 适配器（GPT 模式则更快）。
 
 ## 常见问题
 
@@ -361,8 +430,9 @@ Codex 界面状态，不影响任务上下文。需要时可以手动置顶。
 
 ### 4. 出现两个相同名字的旧任务
 
-早期测试或失败交接可能留下旧任务。不要只根据名字判断；先打开并确认哪一个是
-最新、可以继续回复的任务。不要直接修改 Codex 数据库或 rollout 文件。
+新版本会给配对任务分别加上 `[GPT]` / `[DeepSeek]` 前缀。早期测试或失败交接
+留下的旧任务可能没有标记，不要只根据名字判断；先打开并确认哪一个是最新、
+可以继续回复的任务。不要直接修改 Codex 数据库或 rollout 文件。
 
 ### 5. GPT 报 `Invalid input[*].content ... maximum length 0`
 
@@ -379,6 +449,68 @@ DeepSeek 与 GPT 的联网搜索记录 ID 格式可能不同。本项目会在�
 
 任务交接工具只负责保存和转换任务上下文，不会给模型增加视觉能力。能否看图取决于
 你选择的 DeepSeek 模型及其接口能力。
+
+### 8. 在 DeepSeek 里发消息报 `missing field call_id`
+
+旧版本把 GPT 历史里一条缺少 `call_id` 的工具结果项原样注入 DeepSeek 任务，
+DeepSeek 的接口会因此拒绝整次请求（`input: missing field call_id`）。
+
+当前版本在两处处理它：交接时不再把这种条目写入 DeepSeek 任务；DeepSeek 模式的
+请求会经过本机适配器，适配器只在发往 DeepSeek 的请求里剔除这类无主工具结果项，
+本地聊天记录不动。剔除记录写在：
+
+```text
+%USERPROFILE%\.codex\model-switcher\handoff-logs\adapter-compat-<时间戳>.txt
+```
+
+如果更换 Codex 版本后仍出现类似报错，请保留该日志和报告路径再排查。
+
+### 9. 某个任务报“没有可注入的 Responses 历史项”
+
+这是旧版本的一个缺陷：上次同步之后，源任务里只多出了记账/结束类事件（例如一条
+`task_complete`），没有可注入的正文项，旧版本会把整个任务判为失败。现在这种增量
+会记为“无需交接”并推进同步位置；如果这些事件里仍然嵌着消息内容，则照常镜像到
+目标任务。两种情况都会写进交接报告（`paired-delta-without-response-items` /
+`paired-delta-projection-only`）。
+
+### 10. 我已经在 DeepSeek 模式，只想打开 Codex
+
+直接点 `交接给deepseek`，在选择器里选 **“仅打开 Codex（继续当前模式）”**。
+工具不会写配置、不会做同步，只会启动适配器并打开上次那条任务。
+GPT 模式下同理：点 `交接给GPT` 后选这个按钮。
+
+### 11. 关机前需要先切回 GPT 吗
+
+不需要。关闭 DeepSeek 模式的 Codex 之后，工具不会写配置、不会自动回程、
+也不会重新打开窗口，直接关机是安全的。下次要用的时候，点 `交接给deepseek` 选
+“仅打开 Codex”继续；之后想切回 GPT，点 `交接给GPT` 勾选任务即可，增量会
+自动补齐。
+
+### 12. DeepSeek 模式一直提示网络连接中断
+
+适配器会自动读取 `HTTPS_PROXY` / `HTTP_PROXY` 和 `NO_PROXY`。如果电脑的直连
+443 被阻断、但本机代理（例如 `http://127.0.0.1:7892`）正常运行，DeepSeek 请求
+会通过代理发送；无代理环境仍保持直连。适配器健康检查会显示
+`proxyConfigured` / `proxyRequests`，代理错误会记录在：
+
+```text
+%USERPROFILE%\.codex\model-switcher\handoff-logs\adapter-compat-<时间戳>.txt
+```
+
+### 13. 交接过的任务在侧栏里看不到
+
+桌面端侧栏走的是只读数据库的快速列表，**`preview` 为空的任务会被跳过**，而交接
+生成的端点因为没跑过回合，`preview` 一直是空的。当前版本会在交接时自动把源任务
+的第一条用户消息文案补写到目标端点（`preview` / `first_user_message` / `title`），
+整个过程在 Codex 关闭时进行：
+
+- 只在目标端点的该列还是空的时候写入，不覆盖已有内容；
+- 写入前把 `state_5.sqlite`（含 `-wal`/`-shm`）备份到
+  `%USERPROFILE%\.codex\model-switcher\thread-localizer\reports\state-backups\`；
+- 写入后用回读校验，校验失败会自动从备份恢复；
+- 交接报告里会记录 `previewBackfill` 的结果。
+
+因此如果之前有看不到的交接任务，**再点一次对应快捷方式并勾选该任务**即可补齐。
 
 ## 如何卸载？
 
@@ -443,7 +575,13 @@ Responses API。普通用户不需要手动修改 `config.toml`。
 ```powershell
 npm test
 pwsh -NoProfile -File ".\scripts\check-powershell.ps1"
+pwsh -NoProfile -File ".\scripts\test-picker-sorting.ps1"
+pwsh -NoProfile -File ".\scripts\test-sidebar-sync.ps1"
+pwsh -NoProfile -File ".\scripts\test-handoff-result-contract.ps1"
 ```
+
+也可以在根目录直接运行 `npm run test:powershell`、`npm run test:picker`
+`npm run test:sidebar` 和 `npm run test:contract`。
 
 ### 协议检查与 dry-run
 
@@ -466,8 +604,9 @@ npm run dry-run:openai
 - DeepSeek 默认使用 `deepseek-v4-pro + max`。进入 DeepSeek 模式后，可在 Codex
   原生模型菜单中为当前任务切换 V4 Pro/V4 Flash 与 Low/High/Max。
 - 部分 Codex Desktop 会过滤第三方模型名。启动器会生成两个本机兼容菜单项，
-  并且只在 DeepSeek 模式启动一个绑定 `127.0.0.1` 的模型名称适配器。它只把
-  兼容名称换回官方 DeepSeek slug；GPT 请求不会经过它，消息正文、工具调用、
+  并且只在 DeepSeek 模式启动一个绑定 `127.0.0.1` 的模型名称适配器。它把
+  兼容名称换回官方 DeepSeek slug，并剔除 DeepSeek 接口无法接受的“无主工具
+  结果项”（缺 `call_id` 的工具结果）；GPT 请求不会经过它，消息正文、工具调用、
   搜索记录和返回流也不会被它改写。
 - 交接器会记住每个任务最后使用的 DeepSeek 模型和思考强度；下次从 GPT 交接
   回来时优先恢复。只有从未使用过 DeepSeek 的任务才采用默认值。

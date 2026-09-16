@@ -119,7 +119,7 @@ can contain task names and message metadata.
 ## Desktop entries
 
 - Use the DeepSeek shortcut when switching from GPT to DeepSeek.
-- Use the desktop `任务交接GPT` shortcut when switching from DeepSeek to GPT.
+- Use the desktop `交接给GPT` shortcut when switching from DeepSeek to GPT.
 - The standard taskbar Codex icon remains a direct GPT entry. Use it only when
   the previous session was already GPT and no provider handoff is pending.
 

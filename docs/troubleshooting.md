@@ -8,6 +8,24 @@ Fix the reported task or use `--only-task-id` for a controlled acceptance test;
 do not repeatedly click the shortcut. The per-user lock makes extra clicks
 no-ops while a handoff is running.
 
+## The picker shows no candidates, or you only want to open Codex
+
+Both shortcuts are "target mode" entries and both offer a third button,
+`仅打开 Codex（继续当前模式）`. Choosing it skips every handoff step: the launcher
+starts the DeepSeek adapter when the current mode is DeepSeek, reopens the last
+task through `handoff-logs/last-opened.json` when that record exists, and
+otherwise starts Codex normally. An empty candidate list is no longer an error;
+the picker stays open so you can use that button.
+
+## Closing DeepSeek-mode Codex does nothing automatic
+
+The launcher keeps `config.toml` exactly as it is, stops the local DeepSeek
+adapter, and exits when Codex closes. It never restores the GPT configuration,
+never reopens a window, and never synchronizes in the background, so shutting
+the machine down right after closing Codex is safe. Because the adapter stops
+with the launcher, start Codex through `交接给deepseek` (not the official icon)
+when you want to keep using DeepSeek in that mode.
+
 ## `Invalid input[*].content ... maximum length 0`
 
 This means an OpenAI target received a DeepSeek reasoning record with an array
@@ -22,6 +40,52 @@ DeepSeek web-search calls can use `call_*` identifiers while OpenAI expects
 `ws_*`. The normalizer updates the linked `web_search_end.call_id` values and
 stops on collisions. Keep the original report when reporting a new shape; do
 not delete records to make a task appear to load.
+
+## DeepSeek replies with `input: missing field call_id`
+
+DeepSeek's Responses endpoint rejects the whole request when a
+`function_call_output` or `custom_tool_call_output` item has no `call_id`.
+Older OpenAI histories can contain such orphan results, and an injected history
+carried them into the DeepSeek endpoint. Current versions drop those items in
+both places that matter: the paired synchronizer skips them when injecting into
+a DeepSeek target, and the local DeepSeek model adapter removes them from
+outgoing requests. Each adapter drop is appended to
+`handoff-logs/adapter-compat-<timestamp>.txt` and counted in the adapter health
+response. Local history is not rewritten; if DeepSeek rejects a request for a
+different reason, keep that log plus the handoff report before retrying.
+
+## DeepSeek mode repeatedly shows a network interruption
+
+The local adapter now honors `HTTPS_PROXY` / `HTTP_PROXY` (including proxy
+credentials and `NO_PROXY`). This matters when direct outbound TCP 443 is
+blocked but a local proxy such as `http://127.0.0.1:7892` is available. Before
+this compatibility fix the adapter used Node's direct `https.request`, so the
+desktop could show a generic network interruption even though the proxy itself
+was working.
+
+The adapter health response includes `proxyConfigured` and `proxyRequests`; an
+upstream failure is also logged in `handoff-logs/adapter-compat-*.txt`. A quick
+diagnostic is to compare the two paths:
+
+```powershell
+node -e "fetch('https://api.deepseek.com/models').catch(e => console.error(e.cause || e))"
+```
+
+Direct `EACCES`/connection failure with a successful adapter request (usually a
+401 without a key) means the proxy path is doing its job. If the proxy itself is
+down, restart the local proxy service before retrying Codex.
+
+## A task reports `没有可注入的 Responses 历史项`
+
+The source endpoint gained records after the last sync that contain no
+injectable Responses item, for example a `task_complete` event that the desktop
+app appended after the pair cursor was committed. Current versions treat that as
+a completed synchronization instead of a failure: pure bookkeeping events are
+skipped and the source cursor advances, while projection events that still embed
+a message item are mirrored into the target as usual. Both outcomes are recorded
+in the report (`paired-delta-without-response-items` or
+`paired-delta-projection-only`). If a later run reports the same task as failed
+again, attach the newest `batch-handoff-result-*.json` before retrying.
 
 ## The schema path is missing
 
@@ -45,8 +109,9 @@ real catalog to validate the selected model before changing modes.
 
 ## Recovery
 
-During a handoff, the source remains untouched until the replacement is fully
-verified. A failed replacement is deleted. After a successful handoff the old
-source is permanently deleted, so there is no accumulating task backup or
-archived predecessor. Git rollback handles source-code changes only. See
-[safety.md](safety.md) for the exact boundary.
+During the first paired handoff, the source remains untouched until the new
+provider endpoint is fully verified. Later switches reuse the retained paired
+endpoint and synchronize only the source delta. A failed newly-created target
+is deleted; successful paired endpoints are intentionally retained. Git
+rollback handles source-code changes only. See [safety.md](safety.md) for the
+exact boundary.

@@ -76,6 +76,7 @@ if (Test-Path -LiteralPath $configPath -PathType Leaf) {
 # opt in explicitly to remove the encrypted key.
 $knownFiles = @(
     'codex-desktop-model-launcher.ps1',
+    'handoff-result-contract.psm1',
     'create-gpt-handoff-shortcut.ps1',
     'create-handoff-shortcuts.ps1',
     'initialize-handoff.ps1',
@@ -109,7 +110,7 @@ foreach ($relativePath in @('thread-localizer\package.json', 'thread-localizer\R
     }
 }
 
-foreach ($shortcutName in @('任务交接GPT.lnk', 'DeepSeek交接.lnk')) {
+foreach ($shortcutName in @('任务交接GPT.lnk', 'DeepSeek交接.lnk', '交接给GPT.lnk', '交接给deepseek.lnk')) {
     $shortcutPath = Join-Path $DesktopPath $shortcutName
     if ((Test-Path -LiteralPath $shortcutPath -PathType Leaf) -and $PSCmdlet.ShouldProcess($shortcutPath, '删除项目快捷方式')) {
         Remove-Item -LiteralPath $shortcutPath -Force

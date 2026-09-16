@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeOpenAIRolloutRecords } from "../src/openai-rollout-normalizer.mjs";
+import {
+  clearThreadBoundEncryptedReasoning,
+  normalizeOpenAIRolloutRecords,
+} from "../src/openai-rollout-normalizer.mjs";
 
 function record(type, payload) {
   return { line: 1, value: { type, payload } };
@@ -65,4 +68,49 @@ test("rejects missing web search IDs instead of silently handing off", () => {
     () => normalizeOpenAIRolloutRecords(records),
     /缺少可转换的字符串 ID/,
   );
+});
+
+test("clears thread-bound encrypted reasoning without changing summaries", () => {
+  const records = [record("response_item", {
+    type: "reasoning",
+    summary: [{ type: "summary_text", text: "kept" }],
+    content: null,
+    encrypted_content: "old-thread-ciphertext",
+  })];
+  const result = clearThreadBoundEncryptedReasoning(records);
+  assert.equal(result.clearedEncryptedReasoningCount, 1);
+  assert.equal(result.records[0].value.payload.encrypted_content, null);
+  assert.deepEqual(result.records[0].value.payload.summary, [{ type: "summary_text", text: "kept" }]);
+  assert.equal(records[0].value.payload.encrypted_content, "old-thread-ciphertext");
+});
+
+test("drops tool outputs without call_id only when the target is DeepSeek", () => {
+  const records = [
+    record("response_item", { type: "function_call", id: "call-1", call_id: "call-1", name: "exec_command", arguments: "{}" }),
+    record("response_item", { type: "function_call_output", id: "fco-1", call_id: "call-1", output: "ok" }),
+    record("response_item", { type: "function_call_output", id: "fco-orphan", name: "send_message_to_thread", output: "delegation" }),
+    record("response_item", { type: "custom_tool_call_output", id: "cto-orphan", name: "apply_patch", output: "done" }),
+  ];
+
+  const deepseek = normalizeOpenAIRolloutRecords(records, { targetProvider: "deepseek" });
+  assert.equal(deepseek.droppedOrphanToolOutputCount, 2);
+  assert.deepEqual(
+    deepseek.droppedOrphanToolOutputs.map((item) => [item.id, item.type]),
+    [["fco-orphan", "function_call_output"], ["cto-orphan", "custom_tool_call_output"]],
+  );
+  assert.equal(deepseek.records.length, 2);
+  assert.equal(records.length, 4, "原始历史不能被就地修改");
+
+  const openai = normalizeOpenAIRolloutRecords(records, { targetProvider: "openai" });
+  assert.equal(openai.droppedOrphanToolOutputCount, 0);
+  assert.equal(openai.records.length, 4);
+});
+
+test("keeps DeepSeek tool outputs whose call lives in an earlier delta", () => {
+  const records = [
+    record("response_item", { type: "function_call_output", id: "fco-2", call_id: "call-earlier", output: "ok" }),
+  ];
+  const result = normalizeOpenAIRolloutRecords(records, { targetProvider: "deepseek" });
+  assert.equal(result.droppedOrphanToolOutputCount, 0);
+  assert.equal(result.records.length, 1);
 });

@@ -20,15 +20,6 @@ export async function pathExists(filePath) {
   }
 }
 
-export function pathExistsSync(filePath) {
-  try {
-    fs.accessSync(filePath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export async function ensureDir(dirPath) {
   await fsp.mkdir(dirPath, { recursive: true });
 }
@@ -117,8 +108,9 @@ export function parseArgs(argv) {
 
 export function countVisibleMessages(items) {
   return items.filter((item) => {
-    if (!item || typeof item !== "object") return false;
-    if (item.type === "userMessage" || item.type === "agentMessage") return true;
-    return item.type === "message" && (item.role === "user" || item.role === "assistant");
+    const value = item?.item && typeof item.item === "object" ? item.item : item;
+    if (!value || typeof value !== "object") return false;
+    if (["userMessage", "agentMessage", "UserMessage", "AgentMessage"].includes(value.type)) return true;
+    return value.type === "message" && (value.role === "user" || value.role === "assistant");
   }).length;
 }

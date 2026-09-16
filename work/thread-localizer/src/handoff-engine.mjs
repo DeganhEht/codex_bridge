@@ -1,36 +1,45 @@
+import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 import { createAppServerClient } from "./appserver-client.mjs";
 import {
   CODEX_HOME,
-  DEEPSEEK_MODEL,
-  DEEPSEEK_PROVIDER,
-  HANDOFF_MANIFEST_PATH,
-  HANDOFF_TEST_MANIFEST_PATH,
   PROJECT_CWD,
   USER_THREAD_SOURCE,
 } from "./constants.mjs";
-import { findRolloutPath } from "./rollout-reader.mjs";
+import {
+  findRolloutPath,
+  readFlattenedRollout,
+  retargetFlattenedRollout,
+} from "./rollout-reader.mjs";
 import { loadAndValidateSchema } from "./schema-guard.mjs";
 import { appServerProviderOverrides } from "./provider-config.mjs";
-import { normalizeOpenAIRolloutRecords } from "./openai-rollout-normalizer.mjs";
-import { atomicWriteJson, nowIso, pathExists, readJsonl, responseThread, sha256File } from "./utils.mjs";
+import {
+  clearThreadBoundEncryptedReasoning,
+  dropOrphanToolOutputs,
+  normalizeOpenAIRolloutRecords,
+} from "./openai-rollout-normalizer.mjs";
+import { nowIso, pathExists, readJsonl, responseThread, sha256File } from "./utils.mjs";
 import { verifyThread } from "./verify-mirror.mjs";
 
 export function stateRow(threadId) {
   const db = new DatabaseSync(`${CODEX_HOME}\\state_5.sqlite`, { readOnly: true });
   try {
-    return db.prepare(`SELECT id, name, title, model_provider, model, cwd, rollout_path,
-      reasoning_effort, thread_source, archived, is_pinned FROM threads WHERE id = ?`).get(threadId) || null;
+    return db.prepare(`SELECT id, name, title, preview, model_provider, model, cwd, rollout_path,
+      reasoning_effort, thread_source, archived, is_pinned, created_at, updated_at, recency_at
+      FROM threads WHERE id = ?`).get(threadId) || null;
   } finally {
     db.close();
   }
 }
 
 export async function rolloutState(threadId) {
-  const rolloutPath = await findRolloutPath(threadId);
+  const databasePath = stateRow(threadId)?.rollout_path || null;
+  const rolloutPath = databasePath && await pathExists(databasePath)
+    ? databasePath
+    : await findRolloutPath(threadId);
   if (!rolloutPath) throw new Error(`找不到任务 ${threadId} 的 rollout`);
-  const parsed = await readJsonl(rolloutPath);
+  const parsed = await readFlattenedRollout(rolloutPath);
   let activeTurn = false;
   for (const record of parsed.records) {
     if (record.value?.type === "event_msg") {
@@ -38,48 +47,80 @@ export async function rolloutState(threadId) {
       if (["task_complete", "turn_aborted"].includes(record.value.payload?.type)) activeTurn = false;
     }
   }
-  const compatibility = normalizeOpenAIRolloutRecords(parsed.records);
+  const detachedCompatibility = clearThreadBoundEncryptedReasoning(parsed.records);
+  const compatibility = normalizeOpenAIRolloutRecords(detachedCompatibility.records);
+  const orphanToolOutputs = dropOrphanToolOutputs(parsed.records);
+  const flattenedText = `${parsed.records.map((record) => JSON.stringify(record.value)).join("\n")}\n`;
   return {
     rolloutPath,
-    rolloutSha256: await sha256File(rolloutPath),
+    rolloutSha256: crypto.createHash("sha256").update(flattenedText).digest("hex"),
     parseErrorCount: parsed.errors.length,
     activeTurn,
+    flattenedRecordCount: parsed.records.length,
+    segmentCount: parsed.segments.length,
+    threadBoundEncryptedReasoningCount: detachedCompatibility.clearedEncryptedReasoningCount,
     reasoningContentArrayCount: compatibility.normalizedReasoningCount,
     invalidWebSearchCallIdCount: compatibility.normalizedWebSearchCallIdCount,
     invalidWebSearchEventReferenceCount: compatibility.normalizedWebSearchEventReferenceCount,
+    orphanToolOutputCount: orphanToolOutputs.droppedOrphanToolOutputs.length,
+    orphanToolOutputs: orphanToolOutputs.droppedOrphanToolOutputs,
   };
 }
 
-async function normalizeOpenAIRolloutCompatibility(threadId) {
-  const rolloutPath = await findRolloutPath(threadId);
-  if (!rolloutPath) throw new Error(`找不到任务 ${threadId} 的 rollout`);
-  const parsed = await readJsonl(rolloutPath);
-  if (parsed.errors.length > 0) {
-    throw new Error(`无法清洗 ${threadId}：rollout 存在 ${parsed.errors.length} 个解析错误`);
-  }
-  const normalization = normalizeOpenAIRolloutRecords(parsed.records);
-  if (normalization.totalNormalizedCount === 0) {
-    return {
-      rolloutPath,
-      ...normalization,
-      sha256After: await sha256File(rolloutPath),
+function preparedTargetHistory(plan, targetThreadId) {
+  return readFlattenedRollout(plan.source.rolloutPath).then((flattened) => {
+    if (flattened.errors.length > 0) {
+      throw new Error(`无法重建 ${plan.source.threadId}：rollout 历史链存在 ${flattened.errors.length} 个解析错误`);
+    }
+    const retargeted = retargetFlattenedRollout(flattened.records, {
+      sourceThreadId: plan.source.threadId,
+      targetThreadId,
+      targetProvider: plan.target.provider,
+      targetCwd: plan.target.cwd,
+      targetThreadSource: plan.target.threadSource,
+    });
+    const detached = clearThreadBoundEncryptedReasoning(retargeted);
+    const normalized = {
+      ...normalizeOpenAIRolloutRecords(detached.records, { targetProvider: plan.target.provider }),
+      clearedEncryptedReasoningCount: detached.clearedEncryptedReasoningCount,
     };
-  }
-  const temporaryPath = `${rolloutPath}.normalize-${process.pid}.tmp`;
-  const text = `${normalization.records.map((record) => JSON.stringify(record.value)).join("\n")}\n`;
-  await fs.writeFile(temporaryPath, text, "utf8");
-  await fs.rename(temporaryPath, rolloutPath);
-  return {
-    rolloutPath,
-    ...normalization,
-    sha256After: await sha256File(rolloutPath),
-  };
+    const responseItems = normalized.records
+      .filter((record) => record.value?.type === "response_item" && record.value?.payload)
+      .map((record) => record.value.payload);
+    if (responseItems.length === 0) {
+      throw new Error("源任务没有可注入的 Responses 历史项，无法安全建立独立目标任务");
+    }
+    const projectionEvents = normalized.records
+      .filter((record) => (
+        record.value?.type === "event_msg"
+        && ["task_started", "item_completed", "task_complete", "turn_aborted"].includes(record.value?.payload?.type)
+      ));
+    return { flattened, normalized, responseItems, projectionEvents };
+  });
 }
 
-async function readManifest(testMode) {
-  const manifestPath = testMode ? HANDOFF_TEST_MANIFEST_PATH : HANDOFF_MANIFEST_PATH;
-  if (!(await pathExists(manifestPath))) return { manifestPath, manifest: { version: 1, handoffs: [] } };
-  return { manifestPath, manifest: JSON.parse(await fs.readFile(manifestPath, "utf8")) };
+export async function appendProjectionEvents(targetRolloutPath, projectionEvents) {
+  const originalText = await fs.readFile(targetRolloutPath, "utf8");
+  const parsed = await readJsonl(targetRolloutPath);
+  if (parsed.errors.length > 0 || parsed.records[0]?.value?.type !== "session_meta") {
+    throw new Error("独立目标任务未正确写入 session_meta，停止追加历史事件");
+  }
+  let nextOrdinal = parsed.records.reduce((maximum, record) => (
+    Number.isInteger(record.value?.ordinal) ? Math.max(maximum, record.value.ordinal) : maximum
+  ), -1) + 1;
+  const values = projectionEvents.map((record) => ({
+    ...structuredClone(record.value),
+    ordinal: nextOrdinal++,
+  }));
+  if (values.length > 0) {
+    const prefix = originalText.endsWith("\n") || originalText.length === 0 ? "" : "\n";
+    await fs.appendFile(
+      targetRolloutPath,
+      `${prefix}${values.map((value) => JSON.stringify(value)).join("\n")}\n`,
+      "utf8",
+    );
+  }
+  return { originalText, projectionEventCount: values.length };
 }
 
 export async function buildHandoffPlan({
@@ -88,9 +129,7 @@ export async function buildHandoffPlan({
   targetModel = null,
   targetReasoningEffort = null,
   targetName = null,
-  testMode = false,
   pinTarget = false,
-  recordManifest = true,
 }) {
   if (!sourceThreadId || !targetProvider) throw new Error("handoff 需要源任务和目标提供商");
   const schema = await loadAndValidateSchema();
@@ -104,22 +143,8 @@ export async function buildHandoffPlan({
   }
   const sourceDatabase = stateRow(sourceThreadId);
   if (!sourceDatabase) throw new Error(`state_5.sqlite 中找不到源任务 ${sourceThreadId}`);
-  const { manifestPath, manifest } = recordManifest
-    ? await readManifest(testMode)
-    : { manifestPath: null, manifest: { version: 1, handoffs: [] } };
-  const existing = recordManifest
-    ? (manifest.handoffs || []).find((entry) => (
-        entry.sourceThreadId === sourceThreadId
-        && entry.targetProvider === targetProvider
-        && (!targetModel || entry.targetModel === targetModel)
-        && (!targetReasoningEffort || entry.targetReasoningEffort === targetReasoningEffort)
-        && entry.sourceRolloutSha256 === sourceRollout.rolloutSha256
-      )) || null
-    : null;
   const plan = {
     generatedAt: nowIso(),
-    testMode,
-    manifestPath,
     source: {
       threadId: sourceThreadId,
       name: sourceVerification.name,
@@ -134,6 +159,8 @@ export async function buildHandoffPlan({
       turnCount: sourceVerification.turnCount,
       itemCount: sourceVerification.itemCount,
       visibleMessageCount: sourceVerification.visibleMessageCount,
+      flattenedRecordCount: sourceRollout.flattenedRecordCount,
+      segmentCount: sourceRollout.segmentCount,
       isPinned: Boolean(sourceDatabase.is_pinned),
     },
     target: {
@@ -147,43 +174,45 @@ export async function buildHandoffPlan({
       expectedReasoningNormalizations: targetProvider === "openai"
         ? sourceRollout.reasoningContentArrayCount
         : 0,
+      expectedEncryptedReasoningClears: sourceRollout.threadBoundEncryptedReasoningCount,
       expectedWebSearchCallIdNormalizations: targetProvider === "openai"
         ? sourceRollout.invalidWebSearchCallIdCount
         : 0,
       expectedWebSearchEventReferenceNormalizations: targetProvider === "openai"
         ? sourceRollout.invalidWebSearchEventReferenceCount
         : 0,
+      expectedOrphanToolOutputDrops: targetProvider === "openai"
+        ? 0
+        : sourceRollout.orphanToolOutputCount,
     },
     schema: {
       sha256: schema.schemaSha256,
       threadSourceField: schema.threadSourceField,
       threadMetadata: schema.threadMetadata,
     },
-    existingHandoff: existing ? { targetThreadId: existing.targetThreadId, handedOffAt: existing.handedOffAt } : null,
-    safeToProceed: sourceRollout.parseErrorCount === 0 && !sourceRollout.activeTurn && !existing,
+    safeToProceed: sourceRollout.parseErrorCount === 0 && !sourceRollout.activeTurn,
   };
   return plan;
 }
 
 export async function handoffOne(options) {
   const plan = await buildHandoffPlan(options);
-  if (options.emitDryRun !== false) {
-    console.log(JSON.stringify({ type: "handoff-dry-run", plan }, null, 2));
-  }
   if (!options.execute) return { type: "handoff-dry-run", plan };
-  if (!plan.safeToProceed) throw new Error("handoff dry-run 未通过：源任务正在运行、rollout 有错误，或相同交接已经执行");
+  if (!plan.safeToProceed) throw new Error("handoff 前置检查未通过：源任务正在运行，或 rollout 存在解析错误");
 
-  const client = await createAppServerClient({
+  const targetClientOptions = {
     cwd: PROJECT_CWD,
     configOverrides: appServerProviderOverrides(
       plan.target.provider,
       plan.target.model,
       plan.target.reasoningEffort,
     ),
-  });
-  let forkResult;
-  let targetThreadId;
+  };
+  let targetThreadId = null;
+  let targetRolloutPath = null;
   let verification;
+  let normalization = null;
+  let historyTransfer = null;
   const pinning = {
     requested: plan.target.isPinned,
     supported: Boolean(plan.schema.threadMetadata?.pinning?.supported),
@@ -191,51 +220,114 @@ export async function handoffOne(options) {
     status: plan.target.isPinned ? "unsupported-manual" : "not-requested",
   };
   try {
+    const setupClient = await createAppServerClient(targetClientOptions);
     try {
-      const forkParams = {
-        threadId: plan.source.threadId,
+      const startParams = {
         cwd: plan.target.cwd,
         modelProvider: plan.target.provider,
         model: plan.target.model,
         threadSource: plan.target.threadSource,
-        excludeTurns: false,
-        deferGoalContinuation: true,
+        historyMode: "paginated",
       };
       if (plan.target.reasoningEffort) {
-        forkParams.config = { model_reasoning_effort: plan.target.reasoningEffort };
+        startParams.config = { model_reasoning_effort: plan.target.reasoningEffort };
       }
-      forkResult = await client.request("thread/fork", forkParams);
-      targetThreadId = responseThread(forkResult)?.id || forkResult?.threadId || forkResult?.id || null;
-      if (!targetThreadId) throw new Error("thread/fork 没有返回目标任务 ID");
+      const startResult = await setupClient.request("thread/start", startParams);
+      const startedThread = responseThread(startResult);
+      targetThreadId = startedThread?.id || startResult?.threadId || startResult?.id || null;
+      targetRolloutPath = startedThread?.path || null;
+      if (!targetThreadId) throw new Error("thread/start 没有返回目标任务 ID");
+
+      const prepared = await preparedTargetHistory(plan, targetThreadId);
+      await setupClient.request("thread/inject_items", {
+        threadId: targetThreadId,
+        items: prepared.responseItems,
+      });
       if (plan.target.name) {
-        await client.request("thread/name/set", { threadId: targetThreadId, name: plan.target.name });
+        await setupClient.request("thread/name/set", { threadId: targetThreadId, name: plan.target.name });
       }
       if (plan.target.isPinned && pinning.supported) {
         const { method, field } = plan.schema.threadMetadata.pinning;
-        await client.request(method, { threadId: targetThreadId, [field]: true });
+        await setupClient.request(method, { threadId: targetThreadId, [field]: true });
         pinning.applied = true;
         pinning.status = "applied";
       }
-      verification = await verifyThread(client, targetThreadId);
-    } catch (error) {
-      if (targetThreadId) {
-        try {
-          await client.request("thread/delete", { threadId: targetThreadId });
-        } catch (cleanupError) {
-          const original = error instanceof Error ? error.message : String(error);
-          const cleanup = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
-          throw new Error(`${original}；失败目标 ${targetThreadId} 自动删除也失败: ${cleanup}`);
-        }
-      }
-      throw error;
+      historyTransfer = prepared;
+    } finally {
+      await setupClient.close();
     }
-  } finally {
-    await client.close();
+
+    targetRolloutPath = targetRolloutPath || stateRow(targetThreadId)?.rollout_path || null;
+    if (!targetRolloutPath) throw new Error(`找不到独立目标任务 ${targetThreadId} 的 rollout`);
+    const appended = await appendProjectionEvents(targetRolloutPath, historyTransfer.projectionEvents);
+    const targetSeedSha256 = await sha256File(targetRolloutPath);
+
+    const verifyClient = await createAppServerClient(targetClientOptions);
+    try {
+      const resumeParams = {
+        threadId: targetThreadId,
+        cwd: plan.target.cwd,
+        modelProvider: plan.target.provider,
+        model: plan.target.model,
+        excludeTurns: false,
+      };
+      if (plan.target.reasoningEffort) {
+        resumeParams.config = { model_reasoning_effort: plan.target.reasoningEffort };
+      }
+      await verifyClient.request("thread/resume", resumeParams);
+      verification = await verifyThread(verifyClient, targetThreadId);
+    } finally {
+      await verifyClient.close();
+    }
+
+    normalization = {
+      ...historyTransfer.normalized,
+      records: undefined,
+      sha256After: targetSeedSha256,
+    };
+    historyTransfer = {
+      strategy: "independent-start-inject-project",
+      sourceRecordCount: historyTransfer.flattened.records.length,
+      sourceSegmentCount: historyTransfer.flattened.segments.length,
+      injectedResponseItemCount: historyTransfer.responseItems.length,
+      projectionEventCount: appended.projectionEventCount,
+      targetSeedRolloutPath: targetRolloutPath,
+      targetSeedSha256,
+      targetRecordCount: (await rolloutState(targetThreadId)).flattenedRecordCount,
+      sourceReference: null,
+    };
+    if (normalization.normalizedReasoningCount !== plan.target.expectedReasoningNormalizations) {
+      throw new Error(`推理字段清洗数量与 dry-run 不一致：预期 ${plan.target.expectedReasoningNormalizations}，实际 ${normalization.normalizedReasoningCount}`);
+    }
+    if (normalization.clearedEncryptedReasoningCount !== plan.target.expectedEncryptedReasoningClears) {
+      throw new Error(`线程绑定加密推理清洗数量与 dry-run 不一致：预期 ${plan.target.expectedEncryptedReasoningClears}，实际 ${normalization.clearedEncryptedReasoningCount}`);
+    }
+    if (normalization.normalizedWebSearchCallIdCount !== plan.target.expectedWebSearchCallIdNormalizations) {
+      throw new Error(`联网搜索调用 ID 清洗数量与 dry-run 不一致：预期 ${plan.target.expectedWebSearchCallIdNormalizations}，实际 ${normalization.normalizedWebSearchCallIdCount}`);
+    }
+    if (normalization.normalizedWebSearchEventReferenceCount !== plan.target.expectedWebSearchEventReferenceNormalizations) {
+      throw new Error(`联网搜索事件引用清洗数量与 dry-run 不一致：预期 ${plan.target.expectedWebSearchEventReferenceNormalizations}，实际 ${normalization.normalizedWebSearchEventReferenceCount}`);
+    }
+    const droppedOrphanToolOutputCount = (normalization.droppedOrphanToolOutputs || []).length;
+    if (droppedOrphanToolOutputCount !== plan.target.expectedOrphanToolOutputDrops) {
+      throw new Error(`目标提供商不兼容的工具结果项丢弃数量与 dry-run 不一致：预期 ${plan.target.expectedOrphanToolOutputDrops}，实际 ${droppedOrphanToolOutputCount}`);
+    }
+  } catch (error) {
+    if (!targetThreadId) throw error;
+    try {
+      await deleteThread(targetThreadId, plan.target.provider, plan.target.model);
+    } catch (cleanupError) {
+      const original = error instanceof Error ? error.message : String(error);
+      const cleanup = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+      throw new Error(`${original}；失败目标 ${targetThreadId} 自动删除也失败: ${cleanup}`);
+    }
+    throw error;
   }
 
   const targetDatabase = stateRow(targetThreadId);
   const checks = {
     newThreadId: targetThreadId !== plan.source.threadId,
+    independentHistory: historyTransfer?.sourceReference === null,
     provider: targetDatabase?.model_provider === plan.target.provider,
     model: plan.target.model ? targetDatabase?.model === plan.target.model : true,
     reasoningEffort: plan.target.reasoningEffort
@@ -253,25 +345,6 @@ export async function handoffOne(options) {
     throw new Error(`handoff 验收失败: ${JSON.stringify(checks)}`);
   }
 
-  let normalization = null;
-  try {
-    normalization = plan.target.provider === "openai"
-      ? await normalizeOpenAIRolloutCompatibility(targetThreadId)
-      : null;
-    if (normalization && normalization.normalizedReasoningCount !== plan.target.expectedReasoningNormalizations) {
-      throw new Error(`推理字段清洗数量与 dry-run 不一致：预期 ${plan.target.expectedReasoningNormalizations}，实际 ${normalization.normalizedReasoningCount}`);
-    }
-    if (normalization && normalization.normalizedWebSearchCallIdCount !== plan.target.expectedWebSearchCallIdNormalizations) {
-      throw new Error(`联网搜索调用 ID 清洗数量与 dry-run 不一致：预期 ${plan.target.expectedWebSearchCallIdNormalizations}，实际 ${normalization.normalizedWebSearchCallIdCount}`);
-    }
-    if (normalization && normalization.normalizedWebSearchEventReferenceCount !== plan.target.expectedWebSearchEventReferenceNormalizations) {
-      throw new Error(`联网搜索事件引用清洗数量与 dry-run 不一致：预期 ${plan.target.expectedWebSearchEventReferenceNormalizations}，实际 ${normalization.normalizedWebSearchEventReferenceCount}`);
-    }
-  } catch (error) {
-    await deleteThread(targetThreadId, plan.target.provider, plan.target.model);
-    throw error;
-  }
-
   const entry = {
     sourceThreadId: plan.source.threadId,
     sourceProvider: plan.source.provider,
@@ -281,40 +354,43 @@ export async function handoffOne(options) {
     targetThreadId,
     targetProvider: plan.target.provider,
     targetModel: plan.target.model,
-    targetReasoningEffort: plan.target.reasoningEffort,
+    targetReasoningEffort: targetDatabase?.reasoning_effort || plan.target.reasoningEffort || null,
     targetName: plan.target.name,
     cwd: plan.target.cwd,
     handedOffAt: nowIso(),
     backupRoot: null,
     checks,
+    historyTransfer,
     pinning,
     normalization: normalization
       ? {
-          applied: true,
+          applied: normalization.totalNormalizedCount > 0
+            || normalization.clearedEncryptedReasoningCount > 0
+            || (normalization.droppedOrphanToolOutputs || []).length > 0,
           normalizedReasoningCount: normalization.normalizedReasoningCount,
+          clearedEncryptedReasoningCount: normalization.clearedEncryptedReasoningCount,
           normalizedWebSearchCallIdCount: normalization.normalizedWebSearchCallIdCount,
           normalizedWebSearchEventReferenceCount: normalization.normalizedWebSearchEventReferenceCount,
+          droppedOrphanToolOutputCount: (normalization.droppedOrphanToolOutputs || []).length,
+          droppedOrphanToolOutputs: normalization.droppedOrphanToolOutputs || [],
           targetRolloutSha256After: normalization.sha256After,
           backupPath: null,
         }
       : {
           applied: false,
           normalizedReasoningCount: 0,
+          clearedEncryptedReasoningCount: 0,
           normalizedWebSearchCallIdCount: 0,
           normalizedWebSearchEventReferenceCount: 0,
+          droppedOrphanToolOutputCount: 0,
+          droppedOrphanToolOutputs: [],
         },
+    providerCompat: {
+      targetProvider: plan.target.provider,
+      droppedOrphanToolOutputCount: (normalization?.droppedOrphanToolOutputs || []).length,
+      droppedOrphanToolOutputs: normalization?.droppedOrphanToolOutputs || [],
+    },
   };
-  if (options.recordManifest !== false) {
-    const { manifestPath, manifest } = await readManifest(plan.testMode);
-    await atomicWriteJson(manifestPath, {
-      ...manifest,
-      version: 1,
-      updatedAt: nowIso(),
-      currentThreadId: targetThreadId,
-      currentProvider: plan.target.provider,
-      handoffs: [...(manifest.handoffs || []), entry],
-    });
-  }
   return { type: "handed-off", plan, backup: null, entry, verification, targetDatabase };
 }
 
@@ -336,58 +412,20 @@ export async function deleteThread(threadId, provider, model = null) {
   };
 }
 
-export async function rollingHandoff({
-  targetProvider,
-  targetModel = null,
-  targetReasoningEffort = null,
-  execute = false,
-}) {
-  const { manifest } = await readManifest(false);
-  const sourceThreadId = manifest.currentThreadId;
-  const sourceProvider = manifest.currentProvider;
-  if (!sourceThreadId || !sourceProvider) throw new Error("生产 handoff-manifest 缺少当前任务 ID 或提供商");
-  const resolvedTargetModel = targetModel || manifest.currentModel || null;
-  if (sourceProvider === targetProvider && (!resolvedTargetModel || manifest.currentModel === resolvedTargetModel)) {
-    return {
-      type: "rolling-handoff-noop",
-      reason: `当前最新任务已经属于 ${targetProvider}`,
-      currentThreadId: sourceThreadId,
-      currentProvider: sourceProvider,
-      currentModel: manifest.currentModel || null,
-    };
+export async function archiveThread(threadId, provider, model = null) {
+  const client = await createAppServerClient({
+    cwd: PROJECT_CWD,
+    configOverrides: appServerProviderOverrides(provider, model),
+  });
+  try {
+    await client.request("thread/archive", { threadId });
+  } finally {
+    await client.close();
   }
-  const result = await handoffOne({
-    execute,
-    sourceThreadId,
-    targetProvider,
-    targetModel: resolvedTargetModel,
-    targetReasoningEffort,
-    targetName: manifest.taskName || "保持模型互通",
-    testMode: false,
-    pinTarget: manifest.pinTarget !== false,
-  });
-  if (!execute || result.type !== "handed-off") return result;
-
-  const refreshed = await readManifest(false);
-  const handoffs = refreshed.manifest.handoffs || [];
-  if (handoffs.length) handoffs[handoffs.length - 1] = { ...handoffs[handoffs.length - 1], sourceDeleted: false };
-  await atomicWriteJson(refreshed.manifestPath, {
-    ...refreshed.manifest,
-    currentThreadId: result.entry.targetThreadId,
-    currentProvider: targetProvider,
-    currentModel: resolvedTargetModel,
-    handoffs,
-    updatedAt: nowIso(),
-  });
-  const deletedSource = await deleteThread(sourceThreadId, sourceProvider, manifest.currentModel || null);
-  if (!deletedSource.deleted) throw new Error(`新任务已创建，但上一棒 ${sourceThreadId} 未能删除`);
-  const committed = await readManifest(false);
-  const committedHandoffs = committed.manifest.handoffs || [];
-  if (committedHandoffs.length) committedHandoffs[committedHandoffs.length - 1] = {
-    ...committedHandoffs[committedHandoffs.length - 1],
-    sourceDeleted: true,
-    sourceDeletedAt: nowIso(),
+  const after = stateRow(threadId);
+  return {
+    threadId,
+    archived: Boolean(after?.archived),
   };
-  await atomicWriteJson(committed.manifestPath, { ...committed.manifest, handoffs: committedHandoffs, updatedAt: nowIso() });
-  return { ...result, deletedSource };
 }
+
