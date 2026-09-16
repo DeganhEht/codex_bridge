@@ -2,6 +2,14 @@
 
 All notable changes to this project are recorded here.
 
+## Unreleased
+
+- Documentation: the three READMEs were restructured into quick starts and retitled
+  `Codex Bridge` to match the repository name. The beginner walkthrough moved to
+  `docs/install.md`, the FAQ kept only the most common entries, and a new
+  "install it with Codex" section adds copy-paste prompts for installing, updating and
+  troubleshooting through a Codex session.
+
 ## 1.2.0 - 2026-09-16
 
 Derivative release based on

@@ -83,7 +83,8 @@ git push bridge v1.2.0
 
 **安装**
 
-下载源码包解压后，在项目根目录打开 PowerShell 7，按照 `README.md` 的「第一次安装」执行；安装脚本先用 `-WhatIf` 预览再实际运行：
+下载源码包解压后，在项目根目录打开 PowerShell 7，按照 `README.md` 的「手动安装（快速版）」
+或 `docs/install.md` 的完整步骤执行；安装脚本先用 `-WhatIf` 预览再实际运行：
 
 ```powershell
 pwsh -NoProfile -ExecutionPolicy Bypass `
