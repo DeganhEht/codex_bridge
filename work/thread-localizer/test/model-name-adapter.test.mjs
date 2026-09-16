@@ -232,12 +232,12 @@ test("adapter leaves request bodies without encrypted_content parts unchanged", 
 test("adapter keeps serving while Codex runs, even after the launcher window is gone", () => {
   let result = nextAdapterLifetimeState(
     { everSawCodex: false, codexAbsentSince: null },
-    { now: 1_000, parentAlive: true, codexRunning: true },
+    { now: 1_000, supervised: true, codexRunning: true },
   );
   assert.equal(result.exit, false);
   result = nextAdapterLifetimeState(result.state, {
     now: 60_000,
-    parentAlive: false,
+    supervised: false,
     codexRunning: true,
   });
   assert.equal(result.state.everSawCodex, true);
@@ -248,30 +248,30 @@ test("adapter keeps serving while Codex runs, even after the launcher window is 
 test("adapter exits after Codex has been gone for the grace period", () => {
   let result = nextAdapterLifetimeState(
     { everSawCodex: true, codexAbsentSince: null },
-    { now: 1_000, parentAlive: false, codexRunning: false },
+    { now: 1_000, supervised: false, codexRunning: false },
   );
   assert.equal(result.state.codexAbsentSince, 1_000);
   assert.equal(result.exit, false);
-  result = nextAdapterLifetimeState(result.state, { now: 29_000, parentAlive: false, codexRunning: false });
+  result = nextAdapterLifetimeState(result.state, { now: 29_000, supervised: false, codexRunning: false });
   assert.equal(result.exit, false);
-  result = nextAdapterLifetimeState(result.state, { now: 32_000, parentAlive: false, codexRunning: false });
+  result = nextAdapterLifetimeState(result.state, { now: 32_000, supervised: false, codexRunning: false });
   assert.equal(result.exit, true);
 });
 
 test("adapter waits for the first Codex start and never exits while the launcher lives", () => {
   let result = nextAdapterLifetimeState(
     { everSawCodex: false, codexAbsentSince: null },
-    { now: 0, parentAlive: false, codexRunning: false },
+    { now: 0, supervised: false, codexRunning: false },
   );
   assert.equal(result.exit, false);
-  result = nextAdapterLifetimeState(result.state, { now: 60_000, parentAlive: false, codexRunning: false });
+  result = nextAdapterLifetimeState(result.state, { now: 60_000, supervised: false, codexRunning: false });
   assert.equal(result.exit, false);
-  result = nextAdapterLifetimeState(result.state, { now: 200_000, parentAlive: false, codexRunning: false });
+  result = nextAdapterLifetimeState(result.state, { now: 200_000, supervised: false, codexRunning: false });
   assert.equal(result.exit, true);
 
   const supervised = nextAdapterLifetimeState(
     { everSawCodex: true, codexAbsentSince: null },
-    { now: 10_000_000, parentAlive: true, codexRunning: false },
+    { now: 10_000_000, supervised: true, codexRunning: false },
   );
   assert.equal(supervised.exit, false);
 });
@@ -279,10 +279,10 @@ test("adapter waits for the first Codex start and never exits while the launcher
 test("adapter resets the absent timer when Codex comes back", () => {
   let result = nextAdapterLifetimeState(
     { everSawCodex: true, codexAbsentSince: null },
-    { now: 0, parentAlive: false, codexRunning: false },
+    { now: 0, supervised: false, codexRunning: false },
   );
   assert.equal(result.state.codexAbsentSince, 0);
-  result = nextAdapterLifetimeState(result.state, { now: 5_000, parentAlive: false, codexRunning: true });
+  result = nextAdapterLifetimeState(result.state, { now: 5_000, supervised: false, codexRunning: true });
   assert.equal(result.state.codexAbsentSince, null);
   assert.equal(result.exit, false);
 });

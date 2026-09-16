@@ -167,6 +167,13 @@ anything over:
   no automatic return handoff and opens no window — it only stops the local adapter. To
   resume, click the shortcut and choose "just open Codex"; to switch modes, tick the
   tasks and the deltas get filled in.
+- **Launching Codex from its own icon also works:** the installer registers a scheduled
+  task named `CodexDeepSeekAdapterGuard` (at logon, then once a minute). It only starts
+  the adapter when the config is in DeepSeek mode, Codex is running and nothing is
+  listening on the port — so you no longer need the shortcut to avoid a dead port. It
+  never edits `config.toml`, never creates or removes shortcuts and never kills a
+  process. Worst-case delay is about a minute; `交接给deepseek` → "just open Codex" is
+  still instant.
 
 ### Task name tags and sort order
 

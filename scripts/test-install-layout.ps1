@@ -20,9 +20,11 @@ try {
     New-Item -ItemType Directory -Path $installRoot, $codexHome, $desktopPath -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $installRoot 'models-deepseek.json') -Value '{"models":[]}' -Encoding UTF8
 
-    $null = & $installer -SourceRoot $repoRoot -InstallRoot $installRoot -CodexHome $codexHome -DesktopPath $desktopPath -SkipConfiguration -SkipShortcuts -Confirm:$false
+    # -SkipAdapterGuard: 布局测试不注册真实的计划任务，避免污染当前用户。
+    $null = & $installer -SourceRoot $repoRoot -InstallRoot $installRoot -CodexHome $codexHome -DesktopPath $desktopPath -SkipConfiguration -SkipShortcuts -SkipAdapterGuard -Confirm:$false
     foreach ($requiredPath in @(
             'codex-desktop-model-launcher.ps1',
+            'ensure-deepseek-adapter.ps1',
             'handoff-result-contract.psm1',
             'initialize-handoff.ps1',
             'create-handoff-shortcuts.ps1',
@@ -45,6 +47,7 @@ try {
         manifestPreserved = Test-Path -LiteralPath (Join-Path $installRoot 'thread-localizer\data\batch-handoff-manifest.json')
         reportPreserved = Test-Path -LiteralPath (Join-Path $installRoot 'thread-localizer\reports\preserve-check.txt')
         sourceRemoved = -not (Test-Path -LiteralPath (Join-Path $installRoot 'thread-localizer\src'))
+        adapterGuardRemoved = -not (Test-Path -LiteralPath (Join-Path $installRoot 'ensure-deepseek-adapter.ps1'))
         resultContractRemoved = -not (Test-Path -LiteralPath (Join-Path $installRoot 'handoff-result-contract.psm1'))
         shortcutsAbsent = @(Get-ChildItem -LiteralPath $desktopPath -Filter '*.lnk').Count -eq 0
     }

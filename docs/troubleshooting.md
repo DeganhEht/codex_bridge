@@ -78,6 +78,13 @@ serving; once Codex has been gone for 30 seconds (default `codexGraceMs`) it
 closes itself, so no orphan process is left behind. A failed handoff that rolls
 the config back to DeepSeek restarts the adapter before the launcher exits.
 
+The installer also registers a scheduled task named `CodexDeepSeekAdapterGuard`
+(at logon, then once a minute). It starts the adapter only when the config is in
+DeepSeek mode, a Codex process is running and nothing is listening on the port;
+it never edits the config, never creates or removes shortcuts and never kills a
+process, so it cannot conflict with the two desktop entries. That is what covers
+"launched Codex straight from its own icon".
+
 **2. Outbound traffic is blocked.** The adapter honors `HTTPS_PROXY` /
 `HTTP_PROXY` (including proxy credentials and `NO_PROXY`). This matters when
 direct outbound TCP 443 is blocked but a local proxy such as

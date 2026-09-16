@@ -5,7 +5,8 @@ param(
     [string]$CodexHome = '',
     [string]$DesktopPath = '',
     [switch]$SkipConfiguration,
-    [switch]$SkipShortcuts
+    [switch]$SkipShortcuts,
+    [switch]$SkipAdapterGuard
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,6 +38,7 @@ foreach ($requiredPath in @(
         (Join-Path $threadSource 'launcher\initialize-handoff.ps1'),
         (Join-Path $threadSource 'launcher\create-handoff-shortcuts.ps1'),
         (Join-Path $threadSource 'launcher\uninstall.ps1'),
+        (Join-Path $threadSource 'launcher\ensure-deepseek-adapter.ps1'),
         (Join-Path $modelSource 'get-deepseek-key.ps1')
     )) {
     if (-not (Test-Path -LiteralPath $requiredPath)) {
@@ -71,6 +73,49 @@ function Copy-DirectoryChecked {
     }
 }
 
+function Register-AdapterGuardTask {
+    <#
+      给“直接点 Codex 图标”用的安全网：登录时以及每分钟检查一次，只在
+      config.toml 是 DeepSeek 模式、Codex 正在运行、端口又没人监听时才启动适配器。
+      它不创建快捷方式、不改配置、不结束任何进程，因此与两个桌面入口不冲突。
+    #>
+    param([Parameter(Mandatory = $true)][string]$InstallRoot)
+
+    $taskName = 'CodexDeepSeekAdapterGuard'
+    $guardScript = Join-Path $InstallRoot 'ensure-deepseek-adapter.ps1'
+    try {
+        $pwshPath = (Get-Process -Id $PID).Path
+        if (-not $pwshPath -or -not (Test-Path -LiteralPath $pwshPath -PathType Leaf)) {
+            $pwshPath = (Get-Command 'pwsh.exe' -ErrorAction SilentlyContinue).Source
+        }
+        if (-not $pwshPath) { throw '找不到 PowerShell 7 可执行文件。' }
+
+        $action = New-ScheduledTaskAction -Execute $pwshPath `
+            -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$guardScript`""
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+        $trigger.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date).Date.AddMinutes(1) `
+                -RepetitionInterval (New-TimeSpan -Minutes 1)).Repetition
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+            -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -StartWhenAvailable
+        try {
+            Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings `
+                -Description 'DeepSeek 模式下确保本机适配器（127.0.0.1）在监听。由 Codex Bridge 安装的守护。' `
+                -Force | Out-Null
+            return [pscustomobject]@{ registered = $true; taskName = $taskName; intervalMinutes = 1; method = 'Register-ScheduledTask' }
+        } catch {
+            # 某些环境（受限令牌 / 组策略）会拒绝 CIM 注册，退回 schtasks。
+            $taskCommand = "`"$pwshPath`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$guardScript`""
+            $output = & schtasks /Create /F /TN $taskName /SC MINUTE /MO 1 /TR $taskCommand 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                throw "Register-ScheduledTask 与 schtasks 都失败：$($output -join ' ')"
+            }
+            return [pscustomobject]@{ registered = $true; taskName = $taskName; intervalMinutes = 1; method = 'schtasks' }
+        }
+    } catch {
+        return [pscustomobject]@{ registered = $false; taskName = $taskName; reason = $_.Exception.Message }
+    }
+}
+
 if ($PSCmdlet.ShouldProcess($InstallRoot, '创建 Codex-DeepSeek-Handoff 安装目录')) {
     New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
 }
@@ -81,6 +126,7 @@ Copy-FileChecked (Join-Path $threadSource 'launcher\create-gpt-handoff-shortcut.
 Copy-FileChecked (Join-Path $threadSource 'launcher\create-handoff-shortcuts.ps1') (Join-Path $InstallRoot 'create-handoff-shortcuts.ps1')
 Copy-FileChecked (Join-Path $threadSource 'launcher\initialize-handoff.ps1') (Join-Path $InstallRoot 'initialize-handoff.ps1')
 Copy-FileChecked (Join-Path $threadSource 'launcher\uninstall.ps1') (Join-Path $InstallRoot 'uninstall.ps1')
+Copy-FileChecked (Join-Path $threadSource 'launcher\ensure-deepseek-adapter.ps1') (Join-Path $InstallRoot 'ensure-deepseek-adapter.ps1')
 $keyHelperDestination = Join-Path $InstallRoot 'get-deepseek-key.ps1'
 if (-not (Test-Path -LiteralPath $keyHelperDestination -PathType Leaf)) {
     Copy-FileChecked (Join-Path $modelSource 'get-deepseek-key.ps1') $keyHelperDestination
@@ -97,6 +143,7 @@ Copy-FileChecked (Join-Path $threadSource 'README.md') (Join-Path $InstallRoot '
 
 $configurationResult = $null
 $shortcutResult = $null
+$adapterGuardResult = $null
 if (-not $WhatIfPreference -and -not $SkipConfiguration) {
     $configurationResult = & (Join-Path $InstallRoot 'initialize-handoff.ps1') -InstallRoot $InstallRoot -CodexHome $CodexHome -Confirm:$false | ConvertFrom-Json
 }
@@ -106,6 +153,9 @@ if (-not $WhatIfPreference -and -not $SkipShortcuts) {
     } else {
         $shortcutResult = & (Join-Path $InstallRoot 'create-handoff-shortcuts.ps1') -InstallRoot $InstallRoot -Provider both -Confirm:$false | ConvertFrom-Json
     }
+}
+if (-not $WhatIfPreference -and -not $SkipAdapterGuard) {
+    $adapterGuardResult = Register-AdapterGuardTask -InstallRoot $InstallRoot
 }
 
 $manifest = [ordered]@{
@@ -120,6 +170,7 @@ $manifest = [ordered]@{
         'create-gpt-handoff-shortcut.ps1',
         'create-handoff-shortcuts.ps1',
         'initialize-handoff.ps1',
+        'ensure-deepseek-adapter.ps1',
         'uninstall.ps1',
         'get-deepseek-key.ps1',
         'thread-localizer\src',
@@ -131,6 +182,7 @@ $manifest = [ordered]@{
     secretFilePreserved = 'deepseek-api-key.dpapi is never created or overwritten by this installer.'
     configuration = $configurationResult
     shortcuts = $shortcutResult
+    adapterGuard = $adapterGuardResult
 }
 $manifestPath = Join-Path $InstallRoot 'install-manifest.json'
 if ($PSCmdlet.ShouldProcess($manifestPath, '写入安装清单')) {
@@ -144,5 +196,7 @@ if ($PSCmdlet.ShouldProcess($manifestPath, '写入安装清单')) {
     whatIf = [bool]$WhatIfPreference
     configurationPlanned = -not $SkipConfiguration
     shortcutsPlanned = -not $SkipShortcuts
+    adapterGuardPlanned = -not $SkipAdapterGuard
+    adapterGuard = $adapterGuardResult
     next = if ($WhatIfPreference) { '检查计划无误后，去掉 -WhatIf 再运行。' } else { '使用桌面的两个任务交接入口切换模型。' }
 } | ConvertTo-Json

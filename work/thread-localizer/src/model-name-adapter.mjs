@@ -19,13 +19,14 @@ export const ADAPTER_LIFETIME_DEFAULTS = {
 
 /**
  * 适配器的存活由“Codex 是否还在”决定，而不是由启动器窗口决定：
- * 启动器还活着时由它负责收尾；启动器先消失（窗口被误关、启动器崩溃）时，
- * 只要 Codex 还在就继续服务，避免 Codex 指向 127.0.0.1 却没人应答的“断网”。
- * Codex 真正退出后（或从未起来过），超过宽限期就自行退出，不留孤儿进程。
+ * 有启动器在（supervised）时由启动器负责收尾；没有启动器（例如由登录守护拉起）或
+ * 启动器先消失（窗口被误关、启动器崩溃）时，只要 Codex 还在就继续服务，避免 Codex
+ * 指向 127.0.0.1 却没人应答的“断网”。Codex 真正退出后（或从未起来过），超过宽限期
+ * 就自行退出，不留孤儿进程。
  */
 export function nextAdapterLifetimeState(state, {
   now,
-  parentAlive,
+  supervised,
   codexRunning,
   codexGraceMs = ADAPTER_LIFETIME_DEFAULTS.codexGraceMs,
   initialGraceMs = ADAPTER_LIFETIME_DEFAULTS.initialGraceMs,
@@ -39,7 +40,7 @@ export function nextAdapterLifetimeState(state, {
   if (next.codexAbsentSince === null || next.codexAbsentSince === undefined) {
     next.codexAbsentSince = now;
   }
-  if (parentAlive) return { state: next, exit: false };
+  if (supervised) return { state: next, exit: false };
   const limit = next.everSawCodex ? codexGraceMs : initialGraceMs;
   return { state: next, exit: now - next.codexAbsentSince >= limit };
 }
@@ -471,6 +472,7 @@ async function main() {
   const lifetime = {
     parentPid: hasParentWatch ? parentPid : null,
     parentAlive: hasParentWatch ? true : null,
+    supervised: hasParentWatch,
     codexRunning: null,
     everSawCodex: false,
     codexAbsentSince: null,
@@ -488,39 +490,39 @@ async function main() {
     process.exit(1);
   });
 
-  if (hasParentWatch) {
-    const pollMs = Number(args["poll-ms"]) || ADAPTER_LIFETIME_DEFAULTS.pollMs;
-    const initialGraceMs = Number(args["initial-grace-ms"]) || ADAPTER_LIFETIME_DEFAULTS.initialGraceMs;
-    let state = { everSawCodex: false, codexAbsentSince: null };
-    let polling = false;
-    const timer = setInterval(async () => {
-      if (polling) return;
-      polling = true;
-      try {
-        const parentAlive = processAlive(parentPid);
-        const codexRunning = await isCodexRunning();
-        const result = nextAdapterLifetimeState(state, {
-          now: Date.now(),
-          parentAlive,
-          codexRunning,
-          codexGraceMs: lifetime.codexGraceMs,
-          initialGraceMs,
-        });
-        state = result.state;
-        lifetime.parentAlive = parentAlive;
-        lifetime.codexRunning = codexRunning;
-        lifetime.everSawCodex = state.everSawCodex;
-        lifetime.codexAbsentSince = state.codexAbsentSince;
-        if (result.exit) {
-          clearInterval(timer);
-          server.close(() => process.exit(0));
-        }
-      } finally {
-        polling = false;
+  const pollMs = Number(args["poll-ms"]) || ADAPTER_LIFETIME_DEFAULTS.pollMs;
+  const initialGraceMs = Number(args["initial-grace-ms"]) || ADAPTER_LIFETIME_DEFAULTS.initialGraceMs;
+  let state = { everSawCodex: false, codexAbsentSince: null };
+  let polling = false;
+  const timer = setInterval(async () => {
+    if (polling) return;
+    polling = true;
+    try {
+      const parentAlive = hasParentWatch ? processAlive(parentPid) : null;
+      const supervised = hasParentWatch && parentAlive === true;
+      const codexRunning = await isCodexRunning();
+      const result = nextAdapterLifetimeState(state, {
+        now: Date.now(),
+        supervised,
+        codexRunning,
+        codexGraceMs: lifetime.codexGraceMs,
+        initialGraceMs,
+      });
+      state = result.state;
+      lifetime.parentAlive = parentAlive;
+      lifetime.supervised = supervised;
+      lifetime.codexRunning = codexRunning;
+      lifetime.everSawCodex = state.everSawCodex;
+      lifetime.codexAbsentSince = state.codexAbsentSince;
+      if (result.exit) {
+        clearInterval(timer);
+        server.close(() => process.exit(0));
       }
-    }, pollMs);
-    timer.unref();
-  }
+    } finally {
+      polling = false;
+    }
+  }, pollMs);
+  timer.unref();
 }
 
 if (import.meta.url === `file:///${process.argv[1]?.replaceAll("\\", "/")}` ||

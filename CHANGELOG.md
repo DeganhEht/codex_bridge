@@ -2,6 +2,27 @@
 
 All notable changes to this project are recorded here.
 
+## 1.2.4 - 2026-09-16
+
+- Added a login guard for the last remaining "no adapter" case: launching Codex from its
+  own icon instead of a shortcut. The installer registers a scheduled task
+  (`CodexDeepSeekAdapterGuard`, at logon and then once a minute) which runs
+  `ensure-deepseek-adapter.ps1`. The guard starts the adapter only when the managed mode
+  is `deepseek`, a `ChatGPT.exe` process is running and nothing is listening on the
+  configured port; otherwise it exits (or reuses the healthy adapter).
+- The guard is deliberately non-invasive so it cannot fight the shortcuts or the
+  launcher: it never edits `config.toml`, never creates or removes shortcuts, never
+  terminates a process, gives up when the port belongs to another program, and takes the
+  same `Local\CodexDeepSeekAdapterGuard` mutex so two runs cannot overlap. Uninstalling
+  removes the task again.
+- The adapter's lifetime watchdog now also runs without `--parent-pid` (the guard starts
+  it that way): supervised adapters stay alive while the launcher waits, unsupervised
+  ones keep serving while Codex runs and clean themselves up afterwards. The health
+  response gained a `supervised` field.
+- Added `scripts/test-adapter-guard.ps1` (5 decision cases: non-DeepSeek mode, Codex not
+  running, would start, reuse a healthy adapter, yield to a foreign port) and extended the
+  install-layout test to cover the new file and task removal.
+
 ## 1.2.3 - 2026-09-16
 
 - Fixed the "DeepSeek mode shows a network interruption" class of failures. DeepSeek-mode

@@ -80,6 +80,7 @@ $knownFiles = @(
     'create-gpt-handoff-shortcut.ps1',
     'create-handoff-shortcuts.ps1',
     'initialize-handoff.ps1',
+    'ensure-deepseek-adapter.ps1',
     'uninstall.ps1',
     'install-manifest.json',
     'handoff-install-state.json'
@@ -118,6 +119,28 @@ foreach ($shortcutName in @('任务交接GPT.lnk', 'DeepSeek交接.lnk', '交接
     }
 }
 
+$adapterGuardRemoved = $false
+$adapterGuardTaskName = 'CodexDeepSeekAdapterGuard'
+try {
+    $guardTask = Get-ScheduledTask -TaskName $adapterGuardTaskName -ErrorAction SilentlyContinue
+    if ($guardTask -and $PSCmdlet.ShouldProcess($adapterGuardTaskName, '删除 DeepSeek 适配器守护计划任务')) {
+        try {
+            Unregister-ScheduledTask -TaskName $adapterGuardTaskName -Confirm:$false
+            $adapterGuardRemoved = $true
+        } catch {
+            $output = & schtasks /Delete /F /TN $adapterGuardTaskName 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $adapterGuardRemoved = $true
+            } else {
+                Write-Warning "删除计划任务失败：$($output -join ' ')"
+            }
+        }
+        if ($adapterGuardRemoved) { $removed.Add("task:$adapterGuardTaskName") }
+    }
+} catch {
+    # 计划任务不存在或没有权限时不影响卸载其余部分。
+}
+
 $secretPath = Join-Path $InstallRoot 'deepseek-api-key.dpapi'
 if ($RemoveEncryptedKey -and (Test-Path -LiteralPath $secretPath -PathType Leaf)) {
     if ($PSCmdlet.ShouldProcess($secretPath, '删除当前 Windows 用户的加密 DeepSeek key')) {
@@ -130,6 +153,7 @@ if ($RemoveEncryptedKey -and (Test-Path -LiteralPath $secretPath -PathType Leaf)
     installRoot = $InstallRoot
     removed = @($removed)
     encryptedKeyRemoved = [bool]($RemoveEncryptedKey -and ($removed -contains $secretPath))
+    adapterGuardRemoved = $adapterGuardRemoved
     taskDataPreserved = $true
     configPreserved = $true
     officialCatalogPreserved = (Test-Path -LiteralPath (Join-Path $InstallRoot 'models-deepseek.json') -PathType Leaf)
