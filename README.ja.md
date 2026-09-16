@@ -166,6 +166,10 @@ Codex Bridge での引き継ぎに失敗しました。%USERPROFILE%\.codex\mode
   アダプターを起動するので、ショートカットを使わなくても無応答になりません。
   `config.toml` は変更せず、ショートカットの作成/削除も、プロセスの終了も行いません。
   反映は最大 1 分程度です（すぐ戻したいときは `交接给deepseek` →「Codex を開くだけ」）。
+  このタスクは `wscript` 経由の非表示ウィンドウで動くため PowerShell のウィンドウは
+  一切表示されず、Codex が終了していればインタープリターすら起動しません。使用する
+  インタープリターのパスは `%USERPROFILE%\.codex\model-switcher\pwsh-path.txt` に記録し、
+  見つからない場合は `handoff-logs\adapter-guard.log` に書き残します。
 
 ### タスク名のマーキングと並び順
 

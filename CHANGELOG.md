@@ -2,6 +2,23 @@
 
 All notable changes to this project are recorded here.
 
+## 1.2.5 - 2026-09-17
+
+- The adapter guard no longer flashes a PowerShell window. The scheduled task now starts
+  `wscript.exe` with a hidden-window launcher (`ensure-deepseek-adapter-hidden.vbs`) that
+  runs the guard with window style 0, and it exits before spawning any process when no
+  Codex process is running — so a closed Codex leaves the machine completely quiet.
+- Fixed a silent failure mode introduced with that launcher: on machines without
+  PowerShell 7 under `Program Files`, the launcher could not find an interpreter and did
+  nothing. It now reads the interpreter path the installer records in `pwsh-path.txt`,
+  falls back to the usual install locations including the Codex runtime copy of
+  PowerShell 7, and finally to Windows PowerShell; when nothing is found it appends
+  `hidden-launcher-no-powershell` to `handoff-logs/adapter-guard.log` instead of failing
+  silently. Uninstalling removes `pwsh-path.txt` as well.
+- Verified without touching the live port: the hidden launcher started an adapter on a
+  test port (10995) with no recorded path, reused the same process once `pwsh-path.txt`
+  was present, and the production adapter on 10101 was left untouched.
+
 ## 1.2.4 - 2026-09-16
 
 - Added a login guard for the last remaining "no adapter" case: launching Codex from its

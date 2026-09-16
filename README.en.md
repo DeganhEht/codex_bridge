@@ -174,6 +174,11 @@ anything over:
   never edits `config.toml`, never creates or removes shortcuts and never kills a
   process. Worst-case delay is about a minute; `交接给deepseek` → "just open Codex" is
   still instant.
+  The task runs through `wscript` with a hidden window, so no PowerShell window ever
+  flashes, and it does not even start an interpreter while Codex is closed. The
+  interpreter path is recorded in `%USERPROFILE%\.codex\model-switcher\pwsh-path.txt`;
+  if nothing can be found it writes to `handoff-logs\adapter-guard.log` instead of failing
+  silently.
 
 ### Task name tags and sort order
 

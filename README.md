@@ -152,6 +152,10 @@ DeepSeek 官方 API key。
   适配器没在监听」时才把适配器拉起来，所以不走快捷方式也不会再遇到"没人应答"。
   它不改 `config.toml`、不建/删快捷方式、不结束任何进程，也不会和两个桌面入口抢；
   延迟最多约 1 分钟，想要立刻恢复仍然点 `交接给deepseek` → 「仅打开 Codex」最快。
+  这个任务通过 `wscript` + 隐藏窗口运行，**不会闪出 PowerShell 窗口**；Codex 没在
+  运行时它连解释器都不会启动，所以关掉 Codex 后完全安静。解释器路径记录在
+  `%USERPROFILE%\.codex\model-switcher\pwsh-path.txt`，找不到时会写进
+  `handoff-logs\adapter-guard.log` 而不是静默失败。
 
 ### 任务名标记与选择顺序
 

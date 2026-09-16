@@ -25,6 +25,7 @@ try {
     foreach ($requiredPath in @(
             'codex-desktop-model-launcher.ps1',
             'ensure-deepseek-adapter.ps1',
+            'ensure-deepseek-adapter-hidden.vbs',
             'handoff-result-contract.psm1',
             'initialize-handoff.ps1',
             'create-handoff-shortcuts.ps1',
@@ -40,6 +41,8 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $installRoot 'thread-localizer\reports') -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $installRoot 'thread-localizer\data\batch-handoff-manifest.json') -Value '{}'
     Set-Content -LiteralPath (Join-Path $installRoot 'thread-localizer\reports\preserve-check.txt') -Value 'preserve'
+    # 安装器会记录解释器路径；卸载必须清掉它（-SkipAdapterGuard 的布局测试里没有生成，这里补一个）。
+    Set-Content -LiteralPath (Join-Path $installRoot 'pwsh-path.txt') -Value 'C:\Program Files\PowerShell\7\pwsh.exe'
     $null = & (Join-Path $installRoot 'uninstall.ps1') -InstallRoot $installRoot -CodexHome $codexHome -DesktopPath $desktopPath -Confirm:$false
 
     $checks = [ordered]@{
@@ -48,6 +51,8 @@ try {
         reportPreserved = Test-Path -LiteralPath (Join-Path $installRoot 'thread-localizer\reports\preserve-check.txt')
         sourceRemoved = -not (Test-Path -LiteralPath (Join-Path $installRoot 'thread-localizer\src'))
         adapterGuardRemoved = -not (Test-Path -LiteralPath (Join-Path $installRoot 'ensure-deepseek-adapter.ps1'))
+        hiddenLauncherRemoved = -not (Test-Path -LiteralPath (Join-Path $installRoot 'ensure-deepseek-adapter-hidden.vbs'))
+        pwshPathRemoved = -not (Test-Path -LiteralPath (Join-Path $installRoot 'pwsh-path.txt'))
         resultContractRemoved = -not (Test-Path -LiteralPath (Join-Path $installRoot 'handoff-result-contract.psm1'))
         shortcutsAbsent = @(Get-ChildItem -LiteralPath $desktopPath -Filter '*.lnk').Count -eq 0
     }

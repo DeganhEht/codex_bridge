@@ -39,6 +39,7 @@ foreach ($requiredPath in @(
         (Join-Path $threadSource 'launcher\create-handoff-shortcuts.ps1'),
         (Join-Path $threadSource 'launcher\uninstall.ps1'),
         (Join-Path $threadSource 'launcher\ensure-deepseek-adapter.ps1'),
+        (Join-Path $threadSource 'launcher\ensure-deepseek-adapter-hidden.vbs'),
         (Join-Path $modelSource 'get-deepseek-key.ps1')
     )) {
     if (-not (Test-Path -LiteralPath $requiredPath)) {
@@ -83,15 +84,24 @@ function Register-AdapterGuardTask {
 
     $taskName = 'CodexDeepSeekAdapterGuard'
     $guardScript = Join-Path $InstallRoot 'ensure-deepseek-adapter.ps1'
+    $hiddenLauncher = Join-Path $InstallRoot 'ensure-deepseek-adapter-hidden.vbs'
+    $taskCommand = "wscript.exe //B //Nologo `"$hiddenLauncher`""
     try {
-        $pwshPath = (Get-Process -Id $PID).Path
-        if (-not $pwshPath -or -not (Test-Path -LiteralPath $pwshPath -PathType Leaf)) {
-            $pwshPath = (Get-Command 'pwsh.exe' -ErrorAction SilentlyContinue).Source
+        if (-not (Test-Path -LiteralPath $hiddenLauncher -PathType Leaf)) {
+            throw "找不到隐藏启动器：$hiddenLauncher"
         }
-        if (-not $pwshPath) { throw '找不到 PowerShell 7 可执行文件。' }
+        if (-not (Test-Path -LiteralPath $guardScript -PathType Leaf)) {
+            throw "找不到守护脚本：$guardScript"
+        }
+        $interpreter = (Get-Process -Id $PID).Path
+        if (-not $interpreter -or -not (Test-Path -LiteralPath $interpreter -PathType Leaf)) {
+            $interpreter = (Get-Command 'pwsh.exe' -ErrorAction SilentlyContinue).Source
+        }
+        if ($interpreter) {
+            Set-Content -LiteralPath (Join-Path $InstallRoot 'pwsh-path.txt') -Value $interpreter -Encoding UTF8
+        }
 
-        $action = New-ScheduledTaskAction -Execute $pwshPath `
-            -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$guardScript`""
+        $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "//B //Nologo `"$hiddenLauncher`""
         $trigger = New-ScheduledTaskTrigger -AtLogOn
         $trigger.Repetition = (New-ScheduledTaskTrigger -Once -At (Get-Date).Date.AddMinutes(1) `
                 -RepetitionInterval (New-TimeSpan -Minutes 1)).Repetition
@@ -104,7 +114,6 @@ function Register-AdapterGuardTask {
             return [pscustomobject]@{ registered = $true; taskName = $taskName; intervalMinutes = 1; method = 'Register-ScheduledTask' }
         } catch {
             # 某些环境（受限令牌 / 组策略）会拒绝 CIM 注册，退回 schtasks。
-            $taskCommand = "`"$pwshPath`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$guardScript`""
             $output = & schtasks /Create /F /TN $taskName /SC MINUTE /MO 1 /TR $taskCommand 2>&1
             if ($LASTEXITCODE -ne 0) {
                 throw "Register-ScheduledTask 与 schtasks 都失败：$($output -join ' ')"
@@ -127,6 +136,7 @@ Copy-FileChecked (Join-Path $threadSource 'launcher\create-handoff-shortcuts.ps1
 Copy-FileChecked (Join-Path $threadSource 'launcher\initialize-handoff.ps1') (Join-Path $InstallRoot 'initialize-handoff.ps1')
 Copy-FileChecked (Join-Path $threadSource 'launcher\uninstall.ps1') (Join-Path $InstallRoot 'uninstall.ps1')
 Copy-FileChecked (Join-Path $threadSource 'launcher\ensure-deepseek-adapter.ps1') (Join-Path $InstallRoot 'ensure-deepseek-adapter.ps1')
+Copy-FileChecked (Join-Path $threadSource 'launcher\ensure-deepseek-adapter-hidden.vbs') (Join-Path $InstallRoot 'ensure-deepseek-adapter-hidden.vbs')
 $keyHelperDestination = Join-Path $InstallRoot 'get-deepseek-key.ps1'
 if (-not (Test-Path -LiteralPath $keyHelperDestination -PathType Leaf)) {
     Copy-FileChecked (Join-Path $modelSource 'get-deepseek-key.ps1') $keyHelperDestination
@@ -171,6 +181,7 @@ $manifest = [ordered]@{
         'create-handoff-shortcuts.ps1',
         'initialize-handoff.ps1',
         'ensure-deepseek-adapter.ps1',
+        'ensure-deepseek-adapter-hidden.vbs',
         'uninstall.ps1',
         'get-deepseek-key.ps1',
         'thread-localizer\src',

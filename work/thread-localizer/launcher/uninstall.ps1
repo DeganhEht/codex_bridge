@@ -81,6 +81,8 @@ $knownFiles = @(
     'create-handoff-shortcuts.ps1',
     'initialize-handoff.ps1',
     'ensure-deepseek-adapter.ps1',
+    'ensure-deepseek-adapter-hidden.vbs',
+    'pwsh-path.txt',
     'uninstall.ps1',
     'install-manifest.json',
     'handoff-install-state.json'
