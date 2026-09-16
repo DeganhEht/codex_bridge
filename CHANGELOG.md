@@ -2,13 +2,18 @@
 
 All notable changes to this project are recorded here.
 
-## Unreleased
+## 1.2.1 - 2026-09-16
 
 - Documentation: the three READMEs were restructured into quick starts and retitled
   `Codex Bridge` to match the repository name. The beginner walkthrough moved to
   `docs/install.md`, the FAQ kept only the most common entries, and a new
   "install it with Codex" section adds copy-paste prompts for installing, updating and
   troubleshooting through a Codex session.
+- Documentation: the credits now state explicitly that the project builds on the Codex
+  desktop app and the official DeepSeek API, and that there is no affiliation with or
+  endorsement by OpenAI or DeepSeek.
+- No functional changes: the code is identical to 1.2.0, this release only republishes the
+  project with the new documentation.
 
 ## 1.2.0 - 2026-09-16
 

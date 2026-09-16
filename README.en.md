@@ -24,6 +24,11 @@ Third-party assets: DeepSeek's official model catalog and the official Codex set
 script stay on your machine. This repository does not redistribute them, nor DeepSeek's
 branded icons; the installer only reuses the official setup you already completed.
 
+Codex Bridge builds on two official components: the **Codex desktop app** (through its own
+`app-server`) and the **official DeepSeek API**. This is a third-party tool with no
+affiliation with, or endorsement from, OpenAI or DeepSeek; those names belong to their
+respective owners.
+
 Maintainer: the rewrite and maintenance of this repository are by `DeganhEht`.
 
 ## What problem does this project solve?

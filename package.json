@@ -1,6 +1,6 @@
 {
   "name": "codex-deepseek-handoff",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "private": true,
   "type": "module",
   "description": "Keep Codex desktop task history usable while switching between OpenAI and DeepSeek.",
