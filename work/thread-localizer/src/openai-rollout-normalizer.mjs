@@ -56,6 +56,53 @@ export function clearThreadBoundEncryptedReasoning(records) {
   return { records: normalizedRecords, clearedEncryptedReasoningCount };
 }
 
+const ENCRYPTED_CONTENT_PLACEHOLDER = "[encrypted content omitted]";
+
+export function stripEncryptedPartsFromContentArray(parts) {
+  if (!Array.isArray(parts)) return { parts, strippedCount: 0 };
+  const kept = [];
+  let strippedCount = 0;
+  for (const part of parts) {
+    if (part && typeof part === "object" && part.type === "encrypted_content") {
+      strippedCount += 1;
+      continue;
+    }
+    kept.push(part);
+  }
+  if (strippedCount === 0) return { parts, strippedCount: 0 };
+  return {
+    parts: kept.length > 0 ? kept : [{ type: "input_text", text: ENCRYPTED_CONTENT_PLACEHOLDER }],
+    strippedCount,
+  };
+}
+
+/**
+ * DeepSeek 的 Responses 接口只接受 input_text / input_image / input_file 三种内容片段。
+ * GPT 侧的多 agent 消息会把正文放进 encrypted_content 片段（例如 send_message_to_thread
+ * 的结果），原样注入时 DeepSeek 会用反序列化错误拒绝整次请求
+ * （input: unknown variant `encrypted_content`）。这里把这些片段替换成占位文本，
+ * 保留消息与 call_id 结构，并且避免留下空数组。
+ */
+export function stripEncryptedContentParts(records) {
+  let strippedEncryptedContentPartCount = 0;
+  const normalizedRecords = (records || []).map((record) => {
+    const payload = record?.value?.payload;
+    if (record?.value?.type !== "response_item" || !payload || typeof payload !== "object") {
+      return record;
+    }
+    let nextPayload = null;
+    for (const field of ["content", "output"]) {
+      const result = stripEncryptedPartsFromContentArray(payload[field]);
+      if (result.strippedCount === 0) continue;
+      strippedEncryptedContentPartCount += result.strippedCount;
+      nextPayload = { ...(nextPayload || payload), [field]: result.parts };
+    }
+    if (!nextPayload) return record;
+    return { ...record, value: { ...record.value, payload: nextPayload } };
+  });
+  return { records: normalizedRecords, strippedEncryptedContentPartCount };
+}
+
 function openAIWebSearchId(sourceId) {
   if (typeof sourceId !== "string" || sourceId.length === 0) {
     throw new Error("联网搜索调用缺少可转换的字符串 ID");
@@ -94,7 +141,8 @@ function buildWebSearchIdMap(records) {
 
 export function normalizeOpenAIRolloutRecords(records, { targetProvider = "openai" } = {}) {
   if (targetProvider !== "openai") {
-    const dropped = dropOrphanToolOutputs(records);
+    const stripped = stripEncryptedContentParts(records);
+    const dropped = dropOrphanToolOutputs(stripped.records);
     return {
       records: dropped.records,
       normalizedReasoningCount: 0,
@@ -103,6 +151,7 @@ export function normalizeOpenAIRolloutRecords(records, { targetProvider = "opena
       totalNormalizedCount: 0,
       droppedOrphanToolOutputs: dropped.droppedOrphanToolOutputs,
       droppedOrphanToolOutputCount: dropped.droppedOrphanToolOutputs.length,
+      strippedEncryptedContentPartCount: stripped.strippedEncryptedContentPartCount,
     };
   }
   const webSearchIdMap = buildWebSearchIdMap(records);
@@ -151,5 +200,6 @@ export function normalizeOpenAIRolloutRecords(records, { targetProvider = "opena
       + normalizedWebSearchEventReferenceCount,
     droppedOrphanToolOutputs: [],
     droppedOrphanToolOutputCount: 0,
+    strippedEncryptedContentPartCount: 0,
   };
 }

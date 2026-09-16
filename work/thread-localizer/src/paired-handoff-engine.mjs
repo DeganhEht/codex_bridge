@@ -12,8 +12,10 @@ import {
 import { readFlattenedRollout } from "./rollout-reader.mjs";
 import {
   findContiguousBlockOccurrences,
+  formatBlockDifferenceSummary,
   recordsFingerprint,
   repeatedTailInfo,
+  summarizeBlockDifferences,
 } from "./pair-sync-signatures.mjs";
 import { countVisibleMessages, nowIso } from "./utils.mjs";
 import { verifyThread } from "./verify-mirror.mjs";
@@ -26,6 +28,27 @@ function retargetDelta(records, { sourceThreadId, targetThreadId }) {
     }
     return { ...record, value };
   });
+}
+
+/**
+ * pendingSync 记录的是上一次尝试时的指纹；指纹算法本身会演进（例如改为只在 payload
+ * 层比对），所以不能只看指纹字符串。只有当目标里已经能唯一识别出“当时准备写入的
+ * 那一块”，并且它记录的边界与当前游标完全一致时，才允许进入对账。
+ */
+export function canReconcilePendingSync({
+  pending,
+  cursorRecordCount,
+  sourceRecordEnd,
+  expectedRecordCount,
+  occurrenceCount,
+  fingerprintsMatch,
+}) {
+  if (!pending) return true;
+  if (fingerprintsMatch) return true;
+  return pending.sourceRecordStart === cursorRecordCount
+    && pending.sourceRecordEnd === sourceRecordEnd
+    && Number(pending.expectedRecordCount) === expectedRecordCount
+    && occurrenceCount === 1;
 }
 
 export function normalizedPairDelta(records, targetProvider) {
@@ -442,7 +465,17 @@ export async function syncExistingPair({
     ? targetHistoryBefore.records.slice(targetRecordStart)
     : targetHistoryBefore.records;
   const existingOccurrences = findContiguousBlockOccurrences(targetTailBefore, expectedHistoryBlock);
-  if (pending && pending.expectedFingerprint !== expectedHistoryFingerprint) {
+  const pendingFingerprintMatches = !pending
+    || pending.expectedFingerprint === expectedHistoryFingerprint;
+  const pendingReconcilable = canReconcilePendingSync({
+    pending,
+    cursorRecordCount: cursor.recordCount,
+    sourceRecordEnd,
+    expectedRecordCount: expectedHistoryBlock.length,
+    occurrenceCount: existingOccurrences.length,
+    fingerprintsMatch: pendingFingerprintMatches,
+  });
+  if (!pendingReconcilable) {
     throw pairTargetError(
       "pending-sync-recovery-required",
       `任务 ${task.stableTaskId} 的 pendingSync 指纹与当前源增量不一致，需先完成恢复`,
@@ -617,10 +650,13 @@ export async function syncExistingPair({
       );
     }
     if (historyOccurrences.length !== 1) {
-      throw new Error(
+      const differenceSummary = summarizeBlockDifferences(targetTail, expectedHistoryBlock);
+      const mismatchError = new Error(
         `配对同步内容指纹验收失败：目标 ${targetThreadId} 找到 ${historyOccurrences.length} 份预期历史块 `
-        + `(预期指纹 ${expectedHistoryFingerprint})`,
+        + `(预期指纹 ${expectedHistoryFingerprint})；${formatBlockDifferenceSummary(differenceSummary)}`,
       );
+      mismatchError.diffSummary = differenceSummary;
+      throw mismatchError;
     }
     checks = {
       provider: stateRow(targetThreadId)?.model_provider === targetProvider,
@@ -678,9 +714,11 @@ export async function syncExistingPair({
     normalization: {
       applied: normalized.totalNormalizedCount > 0
         || normalized.clearedEncryptedReasoningCount > 0
+        || (normalized.strippedEncryptedContentPartCount || 0) > 0
         || droppedOrphanToolOutputs.length > 0,
       normalizedReasoningCount: normalized.normalizedReasoningCount,
       clearedEncryptedReasoningCount: normalized.clearedEncryptedReasoningCount,
+      strippedEncryptedContentPartCount: normalized.strippedEncryptedContentPartCount || 0,
       normalizedWebSearchCallIdCount: normalized.normalizedWebSearchCallIdCount,
       normalizedWebSearchEventReferenceCount: normalized.normalizedWebSearchEventReferenceCount,
       droppedOrphanToolOutputCount: droppedOrphanToolOutputs.length,
@@ -713,6 +751,7 @@ export async function syncExistingPair({
       reconciled,
       normalizedReasoningCount: normalized.normalizedReasoningCount,
       clearedEncryptedReasoningCount: normalized.clearedEncryptedReasoningCount,
+      strippedEncryptedContentPartCount: normalized.strippedEncryptedContentPartCount || 0,
       droppedOrphanToolOutputCount: droppedOrphanToolOutputs.length,
       droppedOrphanToolOutputs,
       synchronizedAt: nowIso(),

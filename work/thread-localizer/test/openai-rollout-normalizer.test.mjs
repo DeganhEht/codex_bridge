@@ -114,3 +114,38 @@ test("keeps DeepSeek tool outputs whose call lives in an earlier delta", () => {
   assert.equal(result.droppedOrphanToolOutputCount, 0);
   assert.equal(result.records.length, 1);
 });
+
+test("strips encrypted_content parts only when the target is DeepSeek", () => {
+  const records = [
+    record("response_item", {
+      type: "message",
+      role: "assistant",
+      content: [
+        { type: "input_text", text: "kept" },
+        { type: "encrypted_content", encrypted_content: "gAAAA-cipher" },
+      ],
+    }),
+    record("response_item", {
+      type: "function_call_output",
+      id: "fco-1",
+      call_id: "call-1",
+      output: [{ type: "encrypted_content", encrypted_content: "gAAAA-only" }],
+    }),
+  ];
+
+  const deepseek = normalizeOpenAIRolloutRecords(records, { targetProvider: "deepseek" });
+  assert.equal(deepseek.strippedEncryptedContentPartCount, 2);
+  assert.deepEqual(deepseek.records[0].value.payload.content, [
+    { type: "input_text", text: "kept" },
+  ]);
+  assert.deepEqual(deepseek.records[1].value.payload.output, [
+    { type: "input_text", text: "[encrypted content omitted]" },
+  ]);
+  assert.equal(deepseek.records[1].value.payload.call_id, "call-1");
+  assert.equal(JSON.stringify(deepseek.records).includes("encrypted_content"), false);
+  assert.equal(JSON.stringify(records).includes("gAAAA-cipher"), true, "原始历史不能被就地修改");
+
+  const openai = normalizeOpenAIRolloutRecords(records, { targetProvider: "openai" });
+  assert.equal(openai.strippedEncryptedContentPartCount, 0);
+  assert.equal(openai.records[0].value.payload.content[1].type, "encrypted_content");
+});

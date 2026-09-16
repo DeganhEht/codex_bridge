@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { dedupeThreadsById, normalizeTaskIds } from "../src/batch-handoff-engine.mjs";
+import {
+  allowsPartialSyncReconcile,
+  dedupeThreadsById,
+  normalizeTaskIds,
+} from "../src/batch-handoff-engine.mjs";
 
 test("task discovery keeps only the newest row for each thread id", () => {
   const result = dedupeThreadsById([
@@ -20,4 +24,24 @@ test("task id selection deduplicates comma lists and preserves order", () => {
     normalizeTaskIds({ taskIds: "a,b,a", onlyTaskId: "c" }),
     ["a", "b", "c"],
   );
+});
+
+test("a partial-sync task may retry only when pendingSync matches the pair", () => {
+  const task = { pendingSync: { sourceThreadId: "source", targetThreadId: "target" } };
+  assert.equal(
+    allowsPartialSyncReconcile(task, { sourceThreadId: "source", targetThreadId: "target" }),
+    true,
+  );
+  assert.equal(
+    allowsPartialSyncReconcile(task, { sourceThreadId: "source", targetThreadId: "other" }),
+    false,
+  );
+  assert.equal(
+    allowsPartialSyncReconcile({ lastError: { reason: "partial-sync" } }, {
+      sourceThreadId: "source",
+      targetThreadId: "target",
+    }),
+    false,
+  );
+  assert.equal(allowsPartialSyncReconcile(task, {}), false);
 });

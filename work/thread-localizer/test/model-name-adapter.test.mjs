@@ -178,6 +178,56 @@ test("large DeepSeek request bodies are sanitized without touching other items",
   assert.equal(forwarded.model, "deepseek-v4-pro");
 });
 
+test("adapter replaces encrypted_content parts that DeepSeek would reject", () => {
+  const input = [
+    {
+      type: "message",
+      role: "assistant",
+      content: [
+        { type: "input_text", text: "kept text" },
+        { type: "encrypted_content", encrypted_content: "gAAAA-ciphertext" },
+      ],
+    },
+    {
+      type: "function_call_output",
+      id: "fco-1",
+      call_id: "call_1",
+      output: [{ type: "encrypted_content", encrypted_content: "gAAAA-only" }],
+    },
+  ];
+  const prepared = prepareRequestBody(
+    Buffer.from(JSON.stringify({ model: "gpt-5.6-sol", input })),
+    pickerToActual,
+  );
+
+  assert.equal(prepared.stripped.length, 2);
+  assert.deepEqual(
+    prepared.stripped.map((entry) => [entry.type, entry.field, entry.count, entry.callId]),
+    [["message", "content", 1, null], ["function_call_output", "output", 1, "call_1"]],
+  );
+  const forwarded = JSON.parse(prepared.outgoing.toString("utf8"));
+  assert.equal(forwarded.model, "deepseek-v4-pro");
+  assert.deepEqual(forwarded.input[0].content, [{ type: "input_text", text: "kept text" }]);
+  assert.equal(forwarded.input[1].call_id, "call_1");
+  assert.deepEqual(forwarded.input[1].output, [
+    { type: "input_text", text: "[encrypted content omitted]" },
+  ]);
+  assert.equal(JSON.stringify(forwarded).includes("encrypted_content"), false);
+  assert.equal(JSON.stringify(input).includes("gAAAA-ciphertext"), true, "原始请求不能被就地修改");
+});
+
+test("adapter leaves request bodies without encrypted_content parts unchanged", () => {
+  const original = {
+    model: "gpt-5.6-sol",
+    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "keep me" }] }],
+  };
+  const prepared = prepareRequestBody(Buffer.from(JSON.stringify(original)), pickerToActual);
+  assert.deepEqual(prepared.stripped, []);
+  assert.deepEqual(prepared.dropped, []);
+  const forwarded = JSON.parse(prepared.outgoing.toString("utf8"));
+  assert.deepEqual(forwarded.input, original.input);
+});
+
 test("proxy selection respects HTTPS_PROXY and NO_PROXY", () => {
   const env = {
     HTTPS_PROXY: "http://127.0.0.1:7892",

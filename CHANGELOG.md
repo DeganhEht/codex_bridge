@@ -2,6 +2,30 @@
 
 All notable changes to this project are recorded here.
 
+## 1.2.2 - 2026-09-16
+
+- Fixed the paired-sync verification so it compares what is actually injected. The
+  target rollout envelope (`timestamp`, `ordinal`, `metadata`, ...) is written by the
+  Codex app-server and never carried over from the source, so the previous
+  whole-record fingerprint could not match for any delta containing such records
+  (for example `send_message_to_thread` tool results). The task was then reported as
+  `partial-sync` even though every record had been written. Comparison now runs on
+  `type` + `payload` only, treats `null` as "missing", and adds a field-level diff
+  summary to the error when a block really differs.
+- Recovery: a `partial-sync` task with a matching `pendingSync` is no longer blocked
+  outright. The engine reconciles the block that is already present (without
+  re-injecting anything) and commits the cursor; it still refuses to inject when the
+  written block cannot be identified, and the `pendingSync` fingerprint check now
+  tolerates fingerprint-algorithm changes as long as the recorded boundaries and the
+  block itself match.
+- DeepSeek compatibility: content parts of type `encrypted_content` (produced by
+  multi-agent message tools) are stripped for DeepSeek targets - when injecting new
+  history and in the local model-name adapter for history that is already stored -
+  because DeepSeek rejects them (`input: unknown variant 'encrypted_content'`) and
+  fails the whole turn. Stripped arrays keep their other parts, or fall back to a
+  placeholder text part instead of an empty array. Both the adapter health response
+  and the compatibility log report the counters.
+
 ## 1.2.1 - 2026-09-16
 
 - Documentation: the three READMEs were restructured into quick starts and retitled

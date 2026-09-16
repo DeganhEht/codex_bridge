@@ -1,8 +1,35 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalizedPairDelta, resumeAndWaitForPairTarget } from "../src/paired-handoff-engine.mjs";
+import {
+  canReconcilePendingSync,
+  normalizedPairDelta,
+  resumeAndWaitForPairTarget,
+} from "../src/paired-handoff-engine.mjs";
 import { pairedResultStatus } from "../src/batch-handoff-engine.mjs";
+
+test("pending sync recovery accepts a rewritten fingerprint only with matching boundaries", () => {
+  const pending = {
+    sourceRecordStart: 2429,
+    sourceRecordEnd: 4225,
+    expectedRecordCount: 1252,
+  };
+  const base = {
+    pending,
+    cursorRecordCount: 2429,
+    sourceRecordEnd: 4225,
+    expectedRecordCount: 1252,
+    occurrenceCount: 1,
+    fingerprintsMatch: false,
+  };
+  assert.equal(canReconcilePendingSync(base), true);
+  assert.equal(canReconcilePendingSync({ ...base, fingerprintsMatch: true, occurrenceCount: 0 }), true);
+  assert.equal(canReconcilePendingSync({ ...base, occurrenceCount: 0 }), false);
+  assert.equal(canReconcilePendingSync({ ...base, sourceRecordEnd: 4300 }), false);
+  assert.equal(canReconcilePendingSync({ ...base, cursorRecordCount: 2400 }), false);
+  assert.equal(canReconcilePendingSync({ ...base, expectedRecordCount: 999 }), false);
+  assert.equal(canReconcilePendingSync({ ...base, pending: null }), true);
+});
 
 test("thread/read does not load a stored target; resume and loaded-list are required before inject", async () => {
   const calls = [];

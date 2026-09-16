@@ -18,6 +18,7 @@ import {
   clearThreadBoundEncryptedReasoning,
   dropOrphanToolOutputs,
   normalizeOpenAIRolloutRecords,
+  stripEncryptedContentParts,
 } from "./openai-rollout-normalizer.mjs";
 import { nowIso, pathExists, readJsonl, responseThread, sha256File } from "./utils.mjs";
 import { verifyThread } from "./verify-mirror.mjs";
@@ -64,6 +65,7 @@ export async function rolloutState(threadId) {
     invalidWebSearchEventReferenceCount: compatibility.normalizedWebSearchEventReferenceCount,
     orphanToolOutputCount: orphanToolOutputs.droppedOrphanToolOutputs.length,
     orphanToolOutputs: orphanToolOutputs.droppedOrphanToolOutputs,
+    encryptedContentPartCount: stripEncryptedContentParts(parsed.records).strippedEncryptedContentPartCount,
   };
 }
 
@@ -184,6 +186,9 @@ export async function buildHandoffPlan({
       expectedOrphanToolOutputDrops: targetProvider === "openai"
         ? 0
         : sourceRollout.orphanToolOutputCount,
+      expectedEncryptedContentPartStrips: targetProvider === "openai"
+        ? 0
+        : sourceRollout.encryptedContentPartCount,
     },
     schema: {
       sha256: schema.schemaSha256,
@@ -366,9 +371,11 @@ export async function handoffOne(options) {
       ? {
           applied: normalization.totalNormalizedCount > 0
             || normalization.clearedEncryptedReasoningCount > 0
+            || (normalization.strippedEncryptedContentPartCount || 0) > 0
             || (normalization.droppedOrphanToolOutputs || []).length > 0,
           normalizedReasoningCount: normalization.normalizedReasoningCount,
           clearedEncryptedReasoningCount: normalization.clearedEncryptedReasoningCount,
+          strippedEncryptedContentPartCount: normalization.strippedEncryptedContentPartCount || 0,
           normalizedWebSearchCallIdCount: normalization.normalizedWebSearchCallIdCount,
           normalizedWebSearchEventReferenceCount: normalization.normalizedWebSearchEventReferenceCount,
           droppedOrphanToolOutputCount: (normalization.droppedOrphanToolOutputs || []).length,
@@ -380,6 +387,7 @@ export async function handoffOne(options) {
           applied: false,
           normalizedReasoningCount: 0,
           clearedEncryptedReasoningCount: 0,
+          strippedEncryptedContentPartCount: 0,
           normalizedWebSearchCallIdCount: 0,
           normalizedWebSearchEventReferenceCount: 0,
           droppedOrphanToolOutputCount: 0,

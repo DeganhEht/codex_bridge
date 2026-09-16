@@ -221,6 +221,19 @@ export function pairedResultStatus(result) {
   return result?.type === "paired-noop" ? "noop" : "handed-off";
 }
 
+/**
+ * 上一次配对同步被判定为 partial-sync 之后，是否还允许再跑一次：
+ * 只有留下的是与当前源/目标端点完全匹配的 pendingSync 时才放行。
+ * 放行是安全的，因为引擎在注入前会先确认目标里是否已经存在预期历史块——
+ * 找到就只对账不写入，找不到而目标又已被写过则直接拒绝注入。
+ */
+export function allowsPartialSyncReconcile(task, { sourceThreadId = null, targetThreadId = null } = {}) {
+  const pending = task?.pendingSync;
+  if (!pending) return false;
+  if (!sourceThreadId || !targetThreadId) return false;
+  return pending.sourceThreadId === sourceThreadId && pending.targetThreadId === targetThreadId;
+}
+
 export function normalizeTaskIds({ onlyTaskId = null, taskIds = null } = {}) {
   const values = [];
   if (Array.isArray(taskIds)) values.push(...taskIds);
@@ -467,6 +480,9 @@ export async function buildBatchHandoffPlan({ targetProvider, onlyTaskId = null,
         expectedWebSearchEventReferenceNormalizations: targetProvider === "openai"
           ? rollout.invalidWebSearchEventReferenceCount
           : 0,
+        expectedEncryptedContentPartStrips: targetProvider === "openai"
+          ? 0
+          : rollout.encryptedContentPartCount || 0,
         providerCompat: {
           targetProvider,
           sourceOrphanToolOutputCount: targetProvider === "openai"
@@ -539,7 +555,13 @@ export async function buildBatchHandoffPlan({ targetProvider, onlyTaskId = null,
         });
         continue;
       }
-      if (pairedMode && task.lastError?.reason === "partial-sync") {
+      const pendingSyncReconcile = pairedMode
+        && task.lastError?.reason === "partial-sync"
+        && allowsPartialSyncReconcile(task, {
+          sourceThreadId: discoveredTask.id,
+          targetThreadId: pairedTargetThreadId,
+        });
+      if (pairedMode && task.lastError?.reason === "partial-sync" && !pendingSyncReconcile) {
         items.push({
           ...common,
           ...rolloutDetails,
@@ -585,6 +607,7 @@ export async function buildBatchHandoffPlan({ targetProvider, onlyTaskId = null,
         ...rolloutDetails,
         action: "handoff",
         reason: null,
+        pendingSyncReconcile: pendingSyncReconcile || null,
         pairedTargetProbeMethod: targetProbe?.method || null,
       });
     } catch (error) {

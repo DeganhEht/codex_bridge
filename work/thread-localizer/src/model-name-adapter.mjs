@@ -4,6 +4,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import tls from "node:tls";
 
+import { stripEncryptedPartsFromContentArray } from "./openai-rollout-normalizer.mjs";
+
 const PRODUCT = "Codex-DeepSeek-Handoff model-name-adapter";
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
 const TOOL_OUTPUT_TYPES = new Set(["function_call_output", "custom_tool_call_output"]);
@@ -194,6 +196,34 @@ export function dropOrphanToolOutputItems(items) {
   return { kept, dropped };
 }
 
+/**
+ * DeepSeek 只接受 input_text / input_image / input_file 三种内容片段。GPT 侧的多 agent
+ * 消息会把正文放进 encrypted_content 片段里，已经注入到 DeepSeek 端点里的历史原样重发
+ * 时会被反序列化错误拒绝（input: unknown variant `encrypted_content`）。这里在转发前
+ * 把这些片段替换成占位文本，结构和 call_id 都保留，也不会留下空数组。
+ */
+export function stripEncryptedContentPartsFromItems(items) {
+  const stripped = [];
+  const kept = (items || []).map((item) => {
+    if (!item || typeof item !== "object") return item;
+    let nextItem = null;
+    for (const field of ["content", "output"]) {
+      const result = stripEncryptedPartsFromContentArray(item[field]);
+      if (result.strippedCount === 0) continue;
+      stripped.push({
+        id: item.id ?? null,
+        callId: item.call_id ?? null,
+        type: item.type ?? null,
+        field,
+        count: result.strippedCount,
+      });
+      nextItem = { ...(nextItem || item), [field]: result.parts };
+    }
+    return nextItem || item;
+  });
+  return { kept, stripped };
+}
+
 export function prepareRequestBody(body, aliases) {
   let parsed;
   try {
@@ -204,6 +234,7 @@ export function prepareRequestBody(body, aliases) {
       model: null,
       rewritten: false,
       dropped: [],
+      stripped: [],
       parseError: error instanceof Error ? error.message : String(error),
     };
   }
@@ -213,6 +244,7 @@ export function prepareRequestBody(body, aliases) {
       model: null,
       rewritten: false,
       dropped: [],
+      stripped: [],
       parseError: "JSON request does not contain a model name",
     };
   }
@@ -224,16 +256,20 @@ export function prepareRequestBody(body, aliases) {
   if (actualModel) parsed.model = actualModel;
 
   let dropped = [];
+  let stripped = [];
   if (Array.isArray(parsed.input)) {
-    const sanitized = dropOrphanToolOutputItems(parsed.input);
+    const encrypted = stripEncryptedContentPartsFromItems(parsed.input);
+    stripped = encrypted.stripped;
+    const sanitized = dropOrphanToolOutputItems(encrypted.kept);
     dropped = sanitized.dropped;
-    if (dropped.length > 0) parsed.input = sanitized.kept;
+    if (dropped.length > 0 || stripped.length > 0) parsed.input = sanitized.kept;
   }
   return {
     outgoing: Buffer.from(JSON.stringify(parsed), "utf8"),
     model: parsed.model,
     rewritten: Boolean(actualModel),
     dropped,
+    stripped,
     parseError: null,
   };
 }
@@ -254,6 +290,7 @@ export function createAdapterServer({ upstreamBaseUrl, aliases, logDir = null })
     jsonRequests: 0,
     modelRewrites: 0,
     droppedToolOutputs: 0,
+    strippedEncryptedContentParts: 0,
     passthroughRequests: 0,
     upstreamErrors: 0,
     proxyConfigured: Boolean(proxy),
@@ -295,6 +332,13 @@ export function createAdapterServer({ upstreamBaseUrl, aliases, logDir = null })
           stats.droppedToolOutputs += prepared.dropped.length;
           appendCompatLog(
             `dropped-orphan-tool-outputs=${prepared.dropped.length} items=${JSON.stringify(prepared.dropped)}`,
+          );
+        }
+        if (prepared.stripped.length > 0) {
+          const strippedCount = prepared.stripped.reduce((total, entry) => total + entry.count, 0);
+          stats.strippedEncryptedContentParts += strippedCount;
+          appendCompatLog(
+            `stripped-encrypted-content-parts=${strippedCount} items=${JSON.stringify(prepared.stripped)}`,
           );
         }
         if (prepared.parseError) {
