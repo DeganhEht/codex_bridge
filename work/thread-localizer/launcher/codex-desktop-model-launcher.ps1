@@ -1183,6 +1183,7 @@ $requestMutexAcquired = $false
 $handoffMutex = $null
 $handoffMutexAcquired = $false
 $modelAdapter = $null
+$keepAdapterAlive = $false
 
 try {
     if (-not $ValidateOnly) {
@@ -1296,7 +1297,27 @@ Codex 桌面应用仍在运行。
         }
     } catch {
         Copy-Item -LiteralPath $backupPath -Destination $configPath -Force
-        throw "任务交接或桌面 Codex 启动失败，配置已自动恢复。$($_.Exception.Message)"
+        # 配置已回滚到切换前的模式。回滚后若是 DeepSeek 模式，必须同时把适配器恢复起来：
+        # 否则 Codex 会指向 127.0.0.1:10101 却没有人应答，表现就是“断网”。
+        $restoredMode = $null
+        $adapterRestoreError = $null
+        try {
+            $restoredMode = Get-CurrentMode -RawConfig (Get-Content -LiteralPath $configPath -Raw -Encoding UTF8)
+        } catch { }
+        if ($restoredMode -eq 'deepseek') {
+            try {
+                $modelAdapter = Start-ModelNameAdapter
+                $keepAdapterAlive = $true
+            } catch {
+                $adapterRestoreError = $_.Exception.Message
+            }
+        }
+        $adapterNote = if ($restoredMode -eq 'deepseek' -and -not $keepAdapterAlive) {
+            "再次运行「交接给deepseek」可以重新启动它。`n$adapterRestoreError`n"
+        } else {
+            ''
+        }
+        throw "任务交接或桌面 Codex 启动失败，配置已自动恢复（仍是 $restoredMode 模式）。$adapterNote$($_.Exception.Message)"
     }
 } catch {
     if ($ValidateOnly) {
@@ -1306,7 +1327,7 @@ Codex 桌面应用仍在运行。
     }
     exit 1
 } finally {
-    if ($null -ne $modelAdapter -and $modelAdapter.Owned -and $null -ne $modelAdapter.Process -and -not $modelAdapter.Process.HasExited) {
+    if (-not $keepAdapterAlive -and $null -ne $modelAdapter -and $modelAdapter.Owned -and $null -ne $modelAdapter.Process -and -not $modelAdapter.Process.HasExited) {
         Stop-Process -Id $modelAdapter.Process.Id -Force -ErrorAction SilentlyContinue
     }
     if ($handoffMutexAcquired -and $null -ne $handoffMutex) {

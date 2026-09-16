@@ -3,12 +3,74 @@ import https from "node:https";
 import fs from "node:fs/promises";
 import path from "node:path";
 import tls from "node:tls";
+import { execFile } from "node:child_process";
 
 import { stripEncryptedPartsFromContentArray } from "./openai-rollout-normalizer.mjs";
 
 const PRODUCT = "Codex-DeepSeek-Handoff model-name-adapter";
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
 const TOOL_OUTPUT_TYPES = new Set(["function_call_output", "custom_tool_call_output"]);
+
+export const ADAPTER_LIFETIME_DEFAULTS = {
+  pollMs: 5000,
+  codexGraceMs: 30000,
+  initialGraceMs: 180000,
+};
+
+/**
+ * 适配器的存活由“Codex 是否还在”决定，而不是由启动器窗口决定：
+ * 启动器还活着时由它负责收尾；启动器先消失（窗口被误关、启动器崩溃）时，
+ * 只要 Codex 还在就继续服务，避免 Codex 指向 127.0.0.1 却没人应答的“断网”。
+ * Codex 真正退出后（或从未起来过），超过宽限期就自行退出，不留孤儿进程。
+ */
+export function nextAdapterLifetimeState(state, {
+  now,
+  parentAlive,
+  codexRunning,
+  codexGraceMs = ADAPTER_LIFETIME_DEFAULTS.codexGraceMs,
+  initialGraceMs = ADAPTER_LIFETIME_DEFAULTS.initialGraceMs,
+}) {
+  const next = { ...state };
+  if (codexRunning) {
+    next.everSawCodex = true;
+    next.codexAbsentSince = null;
+    return { state: next, exit: false };
+  }
+  if (next.codexAbsentSince === null || next.codexAbsentSince === undefined) {
+    next.codexAbsentSince = now;
+  }
+  if (parentAlive) return { state: next, exit: false };
+  const limit = next.everSawCodex ? codexGraceMs : initialGraceMs;
+  return { state: next, exit: now - next.codexAbsentSince >= limit };
+}
+
+export function processAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isCodexRunning() {
+  return new Promise((resolve) => {
+    execFile(
+      "tasklist",
+      ["/FI", "IMAGENAME eq ChatGPT.exe", "/NH"],
+      { windowsHide: true },
+      (error, stdout) => {
+        // 无法判断时保持存活：宁可多留一会儿，也不要误杀正在服务的适配器。
+        if (error) {
+          resolve(true);
+          return;
+        }
+        resolve(/ChatGPT\.exe/i.test(String(stdout || "")));
+      },
+    );
+  });
+}
 
 function parseArgs(argv) {
   const values = {};
@@ -278,7 +340,7 @@ export function rewriteRequestBody(body, aliases) {
   return prepareRequestBody(body, aliases).outgoing;
 }
 
-export function createAdapterServer({ upstreamBaseUrl, aliases, logDir = null }) {
+export function createAdapterServer({ upstreamBaseUrl, aliases, logDir = null, lifetimeStatus = null }) {
   const upstream = new URL(upstreamBaseUrl);
   const transport = upstream.protocol === "https:" ? https : http;
   if (!["http:", "https:"].includes(upstream.protocol)) throw new Error("upstream must use http or https");
@@ -315,7 +377,12 @@ export function createAdapterServer({ upstreamBaseUrl, aliases, logDir = null })
   return http.createServer(async (request, response) => {
     if (request.method === "GET" && request.url === "/__handoff_model_adapter_health") {
       response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ product: PRODUCT, pid: process.pid, stats }));
+      response.end(JSON.stringify({
+        product: PRODUCT,
+        pid: process.pid,
+        stats,
+        lifetime: lifetimeStatus ? lifetimeStatus() : null,
+      }));
       return;
     }
 
@@ -399,18 +466,59 @@ async function main() {
   const logDir = args["log-dir"]
     ? path.resolve(args["log-dir"])
     : path.resolve(path.dirname(args.settings), "..", "..", "handoff-logs");
-  const server = createAdapterServer({ upstreamBaseUrl: args.upstream, aliases, logDir });
+  const parentPid = Number(args["parent-pid"]);
+  const hasParentWatch = Number.isInteger(parentPid) && parentPid > 0;
+  const lifetime = {
+    parentPid: hasParentWatch ? parentPid : null,
+    parentAlive: hasParentWatch ? true : null,
+    codexRunning: null,
+    everSawCodex: false,
+    codexAbsentSince: null,
+    codexGraceMs: Number(args["codex-grace-ms"]) || ADAPTER_LIFETIME_DEFAULTS.codexGraceMs,
+  };
+  const server = createAdapterServer({
+    upstreamBaseUrl: args.upstream,
+    aliases,
+    logDir,
+    lifetimeStatus: () => ({ ...lifetime }),
+  });
   server.listen(port, "127.0.0.1");
   server.on("error", (error) => {
     process.stderr.write(`${error.message}\n`);
     process.exit(1);
   });
 
-  const parentPid = Number(args["parent-pid"]);
-  if (Number.isInteger(parentPid) && parentPid > 0) {
-    const timer = setInterval(() => {
-      try { process.kill(parentPid, 0); } catch { server.close(() => process.exit(0)); }
-    }, 2000);
+  if (hasParentWatch) {
+    const pollMs = Number(args["poll-ms"]) || ADAPTER_LIFETIME_DEFAULTS.pollMs;
+    const initialGraceMs = Number(args["initial-grace-ms"]) || ADAPTER_LIFETIME_DEFAULTS.initialGraceMs;
+    let state = { everSawCodex: false, codexAbsentSince: null };
+    let polling = false;
+    const timer = setInterval(async () => {
+      if (polling) return;
+      polling = true;
+      try {
+        const parentAlive = processAlive(parentPid);
+        const codexRunning = await isCodexRunning();
+        const result = nextAdapterLifetimeState(state, {
+          now: Date.now(),
+          parentAlive,
+          codexRunning,
+          codexGraceMs: lifetime.codexGraceMs,
+          initialGraceMs,
+        });
+        state = result.state;
+        lifetime.parentAlive = parentAlive;
+        lifetime.codexRunning = codexRunning;
+        lifetime.everSawCodex = state.everSawCodex;
+        lifetime.codexAbsentSince = state.codexAbsentSince;
+        if (result.exit) {
+          clearInterval(timer);
+          server.close(() => process.exit(0));
+        }
+      } finally {
+        polling = false;
+      }
+    }, pollMs);
     timer.unref();
   }
 }

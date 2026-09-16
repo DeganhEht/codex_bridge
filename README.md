@@ -185,10 +185,20 @@ DeepSeek 官方 API key。
 
 ### 5. DeepSeek 模式一直提示网络连接中断
 
-适配器会自动读取 `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`：直连 443 被阻断而本机
-代理正常时（例如 `http://127.0.0.1:7892`），请求会走代理；没有代理仍保持直连。
-适配器健康检查里有 `proxyConfigured` / `proxyRequests`，代理错误同样记进上面的
-`adapter-compat-<时间戳>.txt`。
+先分清是「没人应答」还是「出网受阻」——两者的表现一样：
+
+- **没人应答（最常见）**：DeepSeek 模式的请求全部发给本机适配器
+  `127.0.0.1:10101`，它没在跑时每个请求都会在本地被拒绝。用
+  `交接给deepseek` → 「仅打开 Codex」会确保它启动；健康检查能看到
+  `"pid"` 和 `"lifetime"`（其中 `codexRunning` 说明它是否认到 Codex）。
+  现在的适配器**不会因为启动器窗口被关掉而退出**：只有 Codex 退出超过 30 秒才会
+  自我清理；交接失败回滚到 DeepSeek 时，启动器也会把适配器重新拉起来。
+- **出网受阻**：适配器会自动读取 `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY`，
+  直连 443 被阻断而本机代理正常时（例如 `http://127.0.0.1:7892`）会走代理，
+  没有代理仍保持直连。健康检查里的 `proxyConfigured` / `proxyRequests` 可以确认；
+  代理错误同样记进 `adapter-compat-<时间戳>.txt`。
+
+仍然建议：进 DeepSeek 模式一律走 `交接给deepseek`，因为它负责启动这个适配器。
 
 更多问题（格式错误、联网搜索记录冲突、图片能力、旧任务重名、协议缓存等）见
 [故障排查文档](docs/troubleshooting.md)。

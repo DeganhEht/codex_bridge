@@ -208,10 +208,21 @@ is written to `%USERPROFILE%\.codex\model-switcher\handoff-logs\adapter-compat-<
 
 ### 5. DeepSeek mode keeps reporting a network interruption
 
-The adapter honors `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY`: when direct 443 is blocked
-but a local proxy works (for example `http://127.0.0.1:7892`), requests go through the
-proxy; without one they stay direct. The adapter health check exposes `proxyConfigured`
-and `proxyRequests`, and proxy errors land in the same `adapter-compat-<timestamp>.txt`.
+Two different problems look identical here:
+
+- **Nobody is listening (most common):** DeepSeek-mode requests all go to the local
+  adapter on `127.0.0.1:10101`. When it is not running, every request fails locally. Use
+  `交接给deepseek` → "just open Codex" to make sure it starts; the health response shows
+  `pid` and a `lifetime` block whose `codexRunning` field tells you whether it can see
+  Codex. The adapter no longer dies when the launcher window is closed: it only cleans
+  itself up 30 seconds after Codex exits, and a failed handoff that rolls back to DeepSeek
+  restarts it.
+- **Outbound traffic is blocked:** the adapter honors `HTTPS_PROXY`, `HTTP_PROXY` and
+  `NO_PROXY`, so it uses your local proxy (for example `http://127.0.0.1:7892`) when
+  direct 443 fails. `proxyConfigured` / `proxyRequests` in the health response confirm
+  this, and proxy errors land in `adapter-compat-<timestamp>.txt`.
+
+Always enter DeepSeek mode through `交接给deepseek`: that is what starts the adapter.
 
 More topics (format errors, web-search record conflicts, image support, duplicate old
 tasks, protocol cache) are covered in [docs/troubleshooting.md](docs/troubleshooting.md).

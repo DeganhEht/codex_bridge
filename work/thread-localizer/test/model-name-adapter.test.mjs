@@ -8,6 +8,7 @@ import test from "node:test";
 import { buildPickerCatalog } from "../src/build-picker-catalog.mjs";
 import {
   createAdapterServer,
+  nextAdapterLifetimeState,
   prepareRequestBody,
   resolveProxyForTarget,
   rewriteRequestBody,
@@ -226,6 +227,64 @@ test("adapter leaves request bodies without encrypted_content parts unchanged", 
   assert.deepEqual(prepared.dropped, []);
   const forwarded = JSON.parse(prepared.outgoing.toString("utf8"));
   assert.deepEqual(forwarded.input, original.input);
+});
+
+test("adapter keeps serving while Codex runs, even after the launcher window is gone", () => {
+  let result = nextAdapterLifetimeState(
+    { everSawCodex: false, codexAbsentSince: null },
+    { now: 1_000, parentAlive: true, codexRunning: true },
+  );
+  assert.equal(result.exit, false);
+  result = nextAdapterLifetimeState(result.state, {
+    now: 60_000,
+    parentAlive: false,
+    codexRunning: true,
+  });
+  assert.equal(result.state.everSawCodex, true);
+  assert.equal(result.state.codexAbsentSince, null);
+  assert.equal(result.exit, false);
+});
+
+test("adapter exits after Codex has been gone for the grace period", () => {
+  let result = nextAdapterLifetimeState(
+    { everSawCodex: true, codexAbsentSince: null },
+    { now: 1_000, parentAlive: false, codexRunning: false },
+  );
+  assert.equal(result.state.codexAbsentSince, 1_000);
+  assert.equal(result.exit, false);
+  result = nextAdapterLifetimeState(result.state, { now: 29_000, parentAlive: false, codexRunning: false });
+  assert.equal(result.exit, false);
+  result = nextAdapterLifetimeState(result.state, { now: 32_000, parentAlive: false, codexRunning: false });
+  assert.equal(result.exit, true);
+});
+
+test("adapter waits for the first Codex start and never exits while the launcher lives", () => {
+  let result = nextAdapterLifetimeState(
+    { everSawCodex: false, codexAbsentSince: null },
+    { now: 0, parentAlive: false, codexRunning: false },
+  );
+  assert.equal(result.exit, false);
+  result = nextAdapterLifetimeState(result.state, { now: 60_000, parentAlive: false, codexRunning: false });
+  assert.equal(result.exit, false);
+  result = nextAdapterLifetimeState(result.state, { now: 200_000, parentAlive: false, codexRunning: false });
+  assert.equal(result.exit, true);
+
+  const supervised = nextAdapterLifetimeState(
+    { everSawCodex: true, codexAbsentSince: null },
+    { now: 10_000_000, parentAlive: true, codexRunning: false },
+  );
+  assert.equal(supervised.exit, false);
+});
+
+test("adapter resets the absent timer when Codex comes back", () => {
+  let result = nextAdapterLifetimeState(
+    { everSawCodex: true, codexAbsentSince: null },
+    { now: 0, parentAlive: false, codexRunning: false },
+  );
+  assert.equal(result.state.codexAbsentSince, 0);
+  result = nextAdapterLifetimeState(result.state, { now: 5_000, parentAlive: false, codexRunning: true });
+  assert.equal(result.state.codexAbsentSince, null);
+  assert.equal(result.exit, false);
 });
 
 test("proxy selection respects HTTPS_PROXY and NO_PROXY", () => {

@@ -56,12 +56,34 @@ different reason, keep that log plus the handoff report before retrying.
 
 ## DeepSeek mode repeatedly shows a network interruption
 
-The local adapter now honors `HTTPS_PROXY` / `HTTP_PROXY` (including proxy
-credentials and `NO_PROXY`). This matters when direct outbound TCP 443 is
-blocked but a local proxy such as `http://127.0.0.1:7892` is available. Before
-this compatibility fix the adapter used Node's direct `https.request`, so the
-desktop could show a generic network interruption even though the proxy itself
-was working.
+DeepSeek-mode Codex sends every request to the local adapter on
+`127.0.0.1:10101`; that adapter rewrites the picker model names and forwards to
+`https://api.deepseek.com/`. Two different failures look identical in the UI.
+
+**1. Nothing is listening (most common).** The adapter is not running, so the
+desktop fails locally on every request. Check it with:
+
+```powershell
+(Invoke-WebRequest 'http://127.0.0.1:10101/__handoff_model_adapter_health' -UseBasicParsing).Content
+```
+
+The response contains `pid`, `stats` and a `lifetime` block:
+`codexRunning` tells you whether the adapter can see a Codex process, and
+`parentPid` / `parentAlive` show whether the launcher that started it is still
+there. Use `交接给deepseek` → "just open Codex" to (re)start it.
+
+The adapter lifetime is tied to Codex, not to the launcher window: if the
+launcher process disappears while Codex is still running, the adapter keeps
+serving; once Codex has been gone for 30 seconds (default `codexGraceMs`) it
+closes itself, so no orphan process is left behind. A failed handoff that rolls
+the config back to DeepSeek restarts the adapter before the launcher exits.
+
+**2. Outbound traffic is blocked.** The adapter honors `HTTPS_PROXY` /
+`HTTP_PROXY` (including proxy credentials and `NO_PROXY`). This matters when
+direct outbound TCP 443 is blocked but a local proxy such as
+`http://127.0.0.1:7892` is available. Before this compatibility fix the adapter
+used Node's direct `https.request`, so the desktop could show a generic network
+interruption even though the proxy itself was working.
 
 The adapter health response includes `proxyConfigured` and `proxyRequests`; an
 upstream failure is also logged in `handoff-logs/adapter-compat-*.txt`. A quick

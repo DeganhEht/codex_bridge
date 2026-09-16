@@ -2,6 +2,23 @@
 
 All notable changes to this project are recorded here.
 
+## 1.2.3 - 2026-09-16
+
+- Fixed the "DeepSeek mode shows a network interruption" class of failures. DeepSeek-mode
+  Codex sends every request to the local adapter, so an adapter that is not running looks
+  exactly like a broken network.
+- The adapter no longer exits when the launcher window disappears. Its lifetime is now
+  tied to Codex: it keeps serving while any Codex process is running, and closes itself
+  `codexGraceMs` (default 30 s) after the last Codex process is gone. Before the first
+  Codex start it waits `initialGraceMs` (default 3 min) instead of leaving an orphan.
+  The health response exposes a `lifetime` block (`parentPid`, `parentAlive`,
+  `codexRunning`, `everSawCodex`) so the state is diagnosable.
+- A failed handoff that rolls back to DeepSeek now restores the runtime as well as
+  `config.toml`: the launcher restarts the adapter before exiting, so "handoff to GPT
+  failed, go back to DeepSeek" no longer leaves Codex pointed at a dead port.
+- README (zh/en/ja) and `docs/troubleshooting.md` explain how to tell the two causes
+  apart (nothing listening vs. blocked outbound traffic) and document the health fields.
+
 ## 1.2.2 - 2026-09-16
 
 - Fixed the paired-sync verification so it compares what is actually injected. The
