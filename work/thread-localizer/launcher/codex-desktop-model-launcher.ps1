@@ -282,6 +282,59 @@ function Start-ModelNameAdapter {
     throw "DeepSeek 模型名称适配器启动失败。`n$details"
 }
 
+function Stop-ModelNameAdapter {
+    <#
+      收掉本机正在监听的适配器（离开 DeepSeek 模式时用）。
+      只结束健康检查确认是本项目适配器的进程，别的程序占用端口时不动。
+    #>
+    param([int]$Port)
+
+    if (-not $Port) { $Port = [int](Get-ModelAdapterSetting 'port') }
+    try {
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/__handoff_model_adapter_health" -TimeoutSec 1
+        if ($health.product -eq 'Codex-DeepSeek-Handoff model-name-adapter') {
+            $adapterPid = [int]$health.pid
+            Stop-Process -Id $adapterPid -Force -ErrorAction SilentlyContinue
+            return $adapterPid
+        }
+    } catch { }
+    return $null
+}
+
+function Write-ManagedConfigForProvider {
+    <#
+      把受管模式区块写成目标 provider 的版本，并返回备份路径。
+      与交接流程共用，保证备份/替换语义一致。
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Provider,
+        [Parameter(Mandatory = $true)][string]$Candidate
+    )
+
+    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+    $backupPath = Join-Path $backupRoot "config.$timestamp.before-$Provider.toml"
+    $temporaryConfig = Join-Path $codexHome "config.toml.model-switcher-$timestamp.tmp"
+    $utf8NoBom = New-Object Text.UTF8Encoding($false)
+    [IO.File]::WriteAllText($temporaryConfig, $Candidate, $utf8NoBom)
+    [IO.File]::Replace($temporaryConfig, $configPath, $backupPath, $true)
+    return $backupPath
+}
+
+function Resolve-LauncherOpenPlan {
+    <#
+      open-only 保持当前模式；handoff / switch-only 打开目标模式。
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$SelectionMode,
+        [Parameter(Mandatory = $true)][string]$CurrentMode,
+        [Parameter(Mandatory = $true)][string]$TargetProvider
+    )
+
+    if ($SelectionMode -eq 'open-only') { return $CurrentMode }
+    return $TargetProvider
+}
+
 function Invoke-TaskInventory {
     param([string]$TargetProvider)
     New-Item -ItemType Directory -Path $handoffLogRoot -Force | Out-Null
@@ -409,9 +462,9 @@ function Select-HandoffTask {
 
     $label = New-Object Windows.Forms.Label
     $label.Text = if ($entries.Count -gt 0) {
-        ('找到 {0} 个可交接端点。可多选；勾选后按「交接选中任务」，或直接选「仅打开 Codex（继续当前模式）」。' -f $entries.Count)
+        ('找到 {0} 个可交接端点。勾选后按「交接并切换」；只想换模型请按「只切换模型（不交接）」；保持当前模式请按「仅打开 Codex」。' -f $entries.Count)
     } else {
-        '当前没有可交接的端点。可以点「仅打开 Codex（继续当前模式）」直接进入 Codex。'
+        '当前没有可交接的端点。可点「只切换模型（不交接）」直接切到目标模式，或点「仅打开 Codex（继续当前模式）」。'
     }
     $label.AutoSize = $false
     $label.Location = New-Object Drawing.Point(14, 12)
@@ -509,7 +562,7 @@ function Select-HandoffTask {
     & $renderList
 
     $ok = New-Object Windows.Forms.Button
-    $ok.Text = '交接选中任务'
+    $ok.Text = '交接并切换'
     $ok.Location = New-Object Drawing.Point(808, 575)
     $ok.Size = New-Object Drawing.Size(140, 34)
     $ok.Add_Click({
@@ -520,10 +573,21 @@ function Select-HandoffTask {
             $form.DialogResult = [Windows.Forms.DialogResult]::OK
             $form.Close()
         } else {
-            [Windows.Forms.MessageBox]::Show('请至少勾选一个任务。', '没有选择任务', 'OK', 'Information') | Out-Null
+            [Windows.Forms.MessageBox]::Show('请至少勾选一个任务；只想换模型请点「只切换模型（不交接）」。', '没有选择任务', 'OK', 'Information') | Out-Null
         }
     })
     $form.Controls.Add($ok)
+
+    $switchOnly = New-Object Windows.Forms.Button
+    $switchOnly.Text = '只切换模型（不交接）'
+    $switchOnly.Location = New-Object Drawing.Point(390, 575)
+    $switchOnly.Size = New-Object Drawing.Size(200, 34)
+    $switchOnly.Add_Click({
+        $form.Tag = [pscustomobject]@{ Mode = 'switch-only' }
+        $form.DialogResult = [Windows.Forms.DialogResult]::OK
+        $form.Close()
+    })
+    $form.Controls.Add($switchOnly)
 
     $openOnly = New-Object Windows.Forms.Button
     $openOnly.Text = '仅打开 Codex（继续当前模式）'
@@ -1255,11 +1319,42 @@ Codex 桌面应用仍在运行。
     if ($null -eq $selection) { exit 0 }
 
     if ($selection.Mode -eq 'open-only') {
-        $openResult = Open-CodexForMode -Mode $currentMode -PreferLastOpened
+        $openMode = Resolve-LauncherOpenPlan -SelectionMode $selection.Mode -CurrentMode $currentMode -TargetProvider $Provider
+        $openResult = Open-CodexForMode -Mode $openMode -PreferLastOpened
         $modelAdapter = $openResult.Adapter
-        if ($currentMode -eq 'deepseek') {
+        if ($openMode -eq 'deepseek') {
             # 保持适配器存活到 Codex 退出；退出后由 finally 停止适配器，配置保持 DeepSeek 不变。
             Wait-For-CodexToExit
+        }
+        exit 0
+    }
+
+    if ($selection.Mode -eq 'switch-only') {
+        # 只换模型：写目标模式的配置、按需启停适配器、打开 Codex。
+        # 不读任务清单、不做任何交接同步，因此不会写 rollout，也不会推进任何游标。
+        $openMode = Resolve-LauncherOpenPlan -SelectionMode $selection.Mode -CurrentMode $currentMode -TargetProvider $Provider
+        if ($openMode -eq $currentMode) {
+            # 已经处于目标模式：等同于「仅打开 Codex」。
+            $openResult = Open-CodexForMode -Mode $currentMode -PreferLastOpened
+            $modelAdapter = $openResult.Adapter
+            if ($currentMode -eq 'deepseek') { Wait-For-CodexToExit }
+            exit 0
+        }
+
+        $backupPath = Write-ManagedConfigForProvider -Provider $Provider -Candidate $candidate
+        try {
+            if ($currentMode -eq 'deepseek') {
+                # 离开 DeepSeek 模式：收掉本机适配器，避免 GPT 模式下残留一个没人用的本地代理。
+                $null = Stop-ModelNameAdapter -Port ([int](Get-ModelAdapterSetting 'port'))
+            }
+            $openResult = Open-CodexForMode -Mode $openMode -PreferLastOpened
+            $modelAdapter = $openResult.Adapter
+            if ($openMode -eq 'deepseek') {
+                Wait-For-CodexToExit
+            }
+        } catch {
+            Copy-Item -LiteralPath $backupPath -Destination $configPath -Force
+            throw "只切换模型失败，配置已自动恢复（仍是 $currentMode 模式）。$($_.Exception.Message)"
         }
         exit 0
     }
@@ -1269,18 +1364,14 @@ Codex 桌面应用仍在运行。
 
     $handoffPreflight = Invoke-BatchHandoff -TargetProvider $Provider -OnlyTaskIds $selectedTaskIds -DryRun
 
-    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
-    $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
-    $backupPath = Join-Path $backupRoot "config.$timestamp.before-$Provider.toml"
-    $temporaryConfig = Join-Path $codexHome "config.toml.model-switcher-$timestamp.tmp"
-    $utf8NoBom = New-Object Text.UTF8Encoding($false)
-    [IO.File]::WriteAllText($temporaryConfig, $candidate, $utf8NoBom)
-
-    [IO.File]::Replace($temporaryConfig, $configPath, $backupPath, $true)
+    $backupPath = Write-ManagedConfigForProvider -Provider $Provider -Candidate $candidate
 
     try {
         if ($Provider -eq 'deepseek') {
             $modelAdapter = Start-ModelNameAdapter
+        } elseif ($currentMode -eq 'deepseek') {
+            # 交接到 GPT 同样是离开 DeepSeek 模式：把适配器收掉，别让它一直挂在 10101。
+            $null = Stop-ModelNameAdapter -Port ([int](Get-ModelAdapterSetting 'port'))
         }
         $handoffResult = Invoke-BatchHandoff -TargetProvider $Provider -OnlyTaskIds $selectedTaskIds
         $sidebarSync = Sync-CodexSidebarRegistrations -HandoffResult $handoffResult

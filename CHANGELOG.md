@@ -2,6 +2,20 @@
 
 All notable changes to this project are recorded here.
 
+## 1.2.6 - 2026-09-19
+
+- The task picker gained a third exit: **"only switch models"**. It writes the target mode's
+  config, starts or stops the local adapter and opens Codex, but never reads the task
+  inventory, never writes rollout history and never moves a synchronization cursor — i.e.
+  a pure model switch for the case where there is nothing to hand over.
+- The primary button is now labelled "hand off and switch", and pressing it without a
+  ticked task points at the switch-only button instead of silently doing nothing.
+- Leaving DeepSeek mode (either through a hand off or through switch-only) now stops the
+  local adapter, so GPT mode no longer leaves a proxy listening on 127.0.0.1 that nobody
+  uses; it is started again automatically when DeepSeek mode is entered.
+- The open-mode decision is now a single tested helper (`Resolve-LauncherOpenPlan`), and
+  the picker suite covers open-only vs. hand off vs. switch-only for both directions.
+
 ## 1.2.5 - 2026-09-17
 
 - The adapter guard no longer flashes a PowerShell window. The scheduled task now starts

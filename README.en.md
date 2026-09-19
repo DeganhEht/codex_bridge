@@ -156,7 +156,12 @@ anything over:
 | DeepSeek | `交接给deepseek` | Choose "just open Codex" to start the adapter and reopen your last task |
 | DeepSeek | `交接给GPT` | Lists every DeepSeek-side task (including conversations started in DeepSeek mode) and syncs them back to GPT |
 | GPT | `交接给GPT` | Same, for bringing leftover DeepSeek conversations back; can also just open Codex |
+| any | either shortcut | "只切换模型（不交接）" (switch-only) changes the mode and opens Codex without touching any task history |
 
+- The picker has three exits: **hand off and switch** (sync the ticked tasks, then switch),
+  **switch-only** (change the model mode without reading tasks, writing history or moving
+  cursors) and **just open Codex in the current mode**. Pressing the hand-off button with
+  nothing ticked now tells you to use switch-only instead.
 - Ticking several tasks opens each of them once so they all show up in the sidebar; the
   task that was actually handed over ends up in the foreground. Two or more tasks also
   produce a summary dialog (with `codex://threads/...` links) and a record in

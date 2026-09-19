@@ -29,7 +29,7 @@ function Assert-Equal {
 $managedStart = '# >>> Codex desktop model switcher: mode (managed; do not edit)'
 $managedEnd = '# <<< Codex desktop model switcher: mode'
 
-$definitions = @('ConvertTo-HandoffPickerEntry', 'Sort-HandoffPickerEntries', 'Get-HandoffPickerHeader', 'Get-CurrentMode', 'Get-DesktopTargetThreadIds') |
+$definitions = @('ConvertTo-HandoffPickerEntry', 'Sort-HandoffPickerEntries', 'Get-HandoffPickerHeader', 'Get-CurrentMode', 'Get-DesktopTargetThreadIds', 'Resolve-LauncherOpenPlan') |
     ForEach-Object { Get-LauncherFunction -Name $_ -Text $launcherText }
 Invoke-Expression ($definitions -join [Environment]::NewLine)
 
@@ -91,7 +91,13 @@ $handoffResult = [pscustomobject]@{
 $targetIds = @(Get-DesktopTargetThreadIds -HandoffResult $handoffResult)
 Assert-Equal (($targetIds -join ',') -join ',') '01a0a924-958f-7ec3-9b2a-96fa0e039779,01a0a924-a042-7922-9c39-f956238e3591' '批量交接目标 ID 收集错误'
 
+# open-only 必须留在当前模式；handoff 与新增的 switch-only 都要打开目标模式。
+Assert-Equal (Resolve-LauncherOpenPlan -SelectionMode 'open-only' -CurrentMode 'deepseek' -TargetProvider 'gpt') 'deepseek' 'open-only 不应切换模式'
+Assert-Equal (Resolve-LauncherOpenPlan -SelectionMode 'handoff' -CurrentMode 'deepseek' -TargetProvider 'gpt') 'gpt' '交接应切换到目标模式'
+Assert-Equal (Resolve-LauncherOpenPlan -SelectionMode 'switch-only' -CurrentMode 'deepseek' -TargetProvider 'gpt') 'gpt' '只切换模型应切换到目标模式'
+Assert-Equal (Resolve-LauncherOpenPlan -SelectionMode 'switch-only' -CurrentMode 'gpt' -TargetProvider 'deepseek') 'deepseek' '只切换模型应支持 GPT 到 DeepSeek 方向'
+
 [ordered]@{
     status = 'ok'
-    cases = 13
+    cases = 17
 } | ConvertTo-Json
